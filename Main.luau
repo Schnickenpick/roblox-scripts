@@ -789,14 +789,18 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- [[ 21. GHOST MODE (barrier flicker) ]]
+-- [[ 21. GHOST MODE ]]
 -- ============================================================
--- Finds the nearest PlotBarrier, computes one position just
--- outside it and one just inside, then alternates every
--- Heartbeat frame so the player is ungrabable.
+-- 1. Saves player CFrame as OriginPoint on enable.
+-- 2. Warps character to the inside of the nearest plot barrier.
+-- 3. Tracks per-frame movement delta at the house location and
+--    mirrors it onto a proxy at OriginPoint (no constant TP).
+-- 4. Proxy Part is parented to Camera — never replicated to server.
+-- 5. On disable, warps back to exact OriginPoint.
 
 local ghostConn
-local ghostPosA, ghostPosB = nil, nil
+local ghostOriginCF = nil   -- CFrame saved when ghost mode was enabled
+local ghostProxy    = nil   -- local-only marker Part, parented to Camera
 
 local function findNearestBarrier()
     local hrp = getRoot(); if not hrp then return nil end
@@ -823,41 +827,88 @@ local function startGhostMode()
         S.ghostMode=false; Toggles.GhostMode:SetValue(false); return
     end
 
-    -- Build two positions on opposite sides of the barrier wall
+    -- 1. Save OriginPoint
+    ghostOriginCF = hrp.CFrame
+
+    -- Compute the inside position (side of barrier further from player)
     local bCF  = pb.CFrame
-    local half = pb.Size.Z / 2 + 2          -- 2 studs past the wall surface
-    local y    = hrp.Position.Y              -- keep player's current height
+    local half = pb.Size.Z / 2 + 2
     local pA   = (bCF * CFrame.new(0, 0,  half)).Position
     local pB   = (bCF * CFrame.new(0, 0, -half)).Position
-    ghostPosA  = CFrame.new(pA.X, y, pA.Z)
-    ghostPosB  = CFrame.new(pB.X, y, pB.Z)
+    local insidePt = (pA - hrp.Position).Magnitude > (pB - hrp.Position).Magnitude
+                     and pA or pB
+    local houseCF  = CFrame.new(insidePt.X, hrp.Position.Y, insidePt.Z)
 
-    -- ghostPosA = whichever side the player is currently on (outside)
-    -- ghostPosB = the opposite side (inside the house)
-    if (ghostPosA.Position - hrp.Position).Magnitude > (ghostPosB.Position - hrp.Position).Magnitude then
-        ghostPosA, ghostPosB = ghostPosB, ghostPosA
-    end
+    -- 4. Create proxy at OriginPoint, parented to Camera (local-only, never replicated)
+    if ghostProxy then ghostProxy:Destroy() end
+    ghostProxy              = Instance.new("Part")
+    ghostProxy.Name         = "GhostProxy"
+    ghostProxy.Anchored     = true
+    ghostProxy.CanCollide   = false
+    ghostProxy.CanQuery     = false
+    ghostProxy.CanTouch     = false
+    ghostProxy.Size         = Vector3.new(2, 5, 1)
+    ghostProxy.CFrame       = ghostOriginCF
+    ghostProxy.Color        = Color3.fromRGB(0, 170, 255)
+    ghostProxy.Material     = Enum.Material.Neon
+    ghostProxy.Transparency = 0.5
+    ghostProxy.CastShadow   = false
+    ghostProxy.Parent       = Camera     -- parented to Camera = local client only
 
-    local flip = false
+    local bb           = Instance.new("BillboardGui")
+    bb.Size            = UDim2.new(0, 120, 0, 30)
+    bb.StudsOffset     = Vector3.new(0, 4, 0)
+    bb.AlwaysOnTop     = true
+    bb.Parent          = ghostProxy
+    local lbl                    = Instance.new("TextLabel")
+    lbl.Size                     = UDim2.new(1, 0, 1, 0)
+    lbl.BackgroundTransparency   = 1
+    lbl.Text                     = LP.Name .. " (ghost)"
+    lbl.TextColor3               = Color3.fromRGB(0, 200, 255)
+    lbl.TextScaled               = true
+    lbl.Parent                   = bb
+
+    -- 2. Warp character inside the house (one-time teleport, not repeated)
+    hrp.CFrame                  = houseCF
+    hrp.AssemblyLinearVelocity  = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+
+    -- 3. Each Heartbeat: measure how much the player moved this frame
+    --    and apply the same delta to the proxy so it mirrors movements
+    --    at OriginPoint without any force-teleporting back and forth.
+    local prevPos = hrp.Position
     disconnect(ghostConn)
     ghostConn = RunService.Heartbeat:Connect(function()
-        if not S.ghostMode then
-            disconnect(ghostConn); ghostConn = nil; return
-        end
+        if not S.ghostMode then disconnect(ghostConn); ghostConn = nil; return end
         local root = getRoot(); if not root then return end
-        flip = not flip
-        root.CFrame                  = flip and ghostPosA or ghostPosB
-        root.AssemblyLinearVelocity  = Vector3.zero
-        root.AssemblyAngularVelocity = Vector3.zero
+
+        local currPos = root.Position
+        local delta   = currPos - prevPos    -- movement this frame at house
+        prevPos       = currPos
+
+        -- Mirror the same delta onto the proxy at OriginPoint
+        if ghostProxy and ghostProxy.Parent then
+            ghostProxy.CFrame = ghostProxy.CFrame + delta
+        end
     end)
 
-    Notify("Ghost","Ghost Mode ON — flickering barrier!",3)
+    Notify("Ghost","Ghost Mode ON — warped inside house",3)
 end
 
 local function stopGhostMode()
     disconnect(ghostConn); ghostConn = nil
-    ghostPosA = nil; ghostPosB = nil
-    Notify("Ghost","Ghost Mode OFF",2)
+
+    -- 5. Warp back to exact OriginPoint
+    local hrp = getRoot()
+    if hrp and ghostOriginCF then
+        hrp.CFrame                  = ghostOriginCF
+        hrp.AssemblyLinearVelocity  = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
+    end
+
+    if ghostProxy then ghostProxy:Destroy(); ghostProxy = nil end
+    ghostOriginCF = nil
+    Notify("Ghost","Ghost Mode OFF — returned to origin",2)
 end
 
 -- ============================================================
@@ -1581,8 +1632,8 @@ DefLeft:AddToggle("AutoStruggle",{Text="Auto-Struggle",Tooltip="Fires Struggle +
         S.autoStruggle=v
         if not v then local c=getChar(); if c then for _,p in pairs(c:GetChildren()) do if p:IsA("BasePart") then p.Anchored=false end end end end
     end})
-DefLeft:AddToggle("GhostMode",{Text="Ghost Mode (barrier flicker)",
-    Tooltip="Rapidly flickers you through the nearest plot barrier every frame — impossible to grab.",
+DefLeft:AddToggle("GhostMode",{Text="Ghost Mode",
+    Tooltip="Saves your position, warps you inside the nearest house barrier, and mirrors your movements onto a local proxy. Toggle OFF to return to exact origin.",
     Default=false,
     Callback=function(v)
         S.ghostMode=v
