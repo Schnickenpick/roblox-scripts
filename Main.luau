@@ -218,6 +218,7 @@ local S = {
     antiKickKunai  = false,
     antiInputLag   = false,
     loopTP         = false,
+    ghostMode      = false,
     -- Combat
     kickSpam      = false,
     kickRagdoll   = false,
@@ -788,7 +789,79 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- [[ 21. PACKET LAG ]]
+-- [[ 21. GHOST MODE (barrier flicker) ]]
+-- ============================================================
+-- Finds the nearest PlotBarrier, computes one position just
+-- outside it and one just inside, then alternates every
+-- Heartbeat frame so the player is ungrabable.
+
+local ghostConn
+local ghostPosA, ghostPosB = nil, nil
+
+local function findNearestBarrier()
+    local hrp = getRoot(); if not hrp then return nil end
+    local plots = Workspace:FindFirstChild("Plots"); if not plots then return nil end
+    local best, bestDist = nil, math.huge
+    for _, plot in ipairs(plots:GetChildren()) do
+        local bar = plot:FindFirstChild("Barrier")
+        local pb  = bar and bar:FindFirstChild("PlotBarrier")
+        if pb and pb:IsA("BasePart") then
+            local d = (pb.Position - hrp.Position).Magnitude
+            if d < bestDist then bestDist = d; best = pb end
+        end
+    end
+    return best
+end
+
+local function startGhostMode()
+    local hrp = getRoot()
+    if not hrp then Notify("Ghost","No character",2); S.ghostMode=false; return end
+
+    local pb = findNearestBarrier()
+    if not pb then
+        Notify("Ghost","No plot barrier found nearby!",3)
+        S.ghostMode=false; Toggles.GhostMode:SetValue(false); return
+    end
+
+    -- Build two positions on opposite sides of the barrier wall
+    local bCF  = pb.CFrame
+    local half = pb.Size.Z / 2 + 2          -- 2 studs past the wall surface
+    local y    = hrp.Position.Y              -- keep player's current height
+    local pA   = (bCF * CFrame.new(0, 0,  half)).Position
+    local pB   = (bCF * CFrame.new(0, 0, -half)).Position
+    ghostPosA  = CFrame.new(pA.X, y, pA.Z)
+    ghostPosB  = CFrame.new(pB.X, y, pB.Z)
+
+    -- ghostPosA = whichever side the player is currently on (outside)
+    -- ghostPosB = the opposite side (inside the house)
+    if (ghostPosA.Position - hrp.Position).Magnitude > (ghostPosB.Position - hrp.Position).Magnitude then
+        ghostPosA, ghostPosB = ghostPosB, ghostPosA
+    end
+
+    local flip = false
+    disconnect(ghostConn)
+    ghostConn = RunService.Heartbeat:Connect(function()
+        if not S.ghostMode then
+            disconnect(ghostConn); ghostConn = nil; return
+        end
+        local root = getRoot(); if not root then return end
+        flip = not flip
+        root.CFrame                  = flip and ghostPosA or ghostPosB
+        root.AssemblyLinearVelocity  = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end)
+
+    Notify("Ghost","Ghost Mode ON — flickering barrier!",3)
+end
+
+local function stopGhostMode()
+    disconnect(ghostConn); ghostConn = nil
+    ghostPosA = nil; ghostPosB = nil
+    Notify("Ghost","Ghost Mode OFF",2)
+end
+
+-- ============================================================
+-- [[ 22. PACKET LAG ]]
 -- ============================================================
 
 local PacketSpamAmount = 100
@@ -1507,6 +1580,13 @@ DefLeft:AddToggle("AutoStruggle",{Text="Auto-Struggle",Tooltip="Fires Struggle +
     Callback=function(v)
         S.autoStruggle=v
         if not v then local c=getChar(); if c then for _,p in pairs(c:GetChildren()) do if p:IsA("BasePart") then p.Anchored=false end end end end
+    end})
+DefLeft:AddToggle("GhostMode",{Text="Ghost Mode (barrier flicker)",
+    Tooltip="Rapidly flickers you through the nearest plot barrier every frame — impossible to grab.",
+    Default=false,
+    Callback=function(v)
+        S.ghostMode=v
+        if v then startGhostMode() else stopGhostMode() end
     end})
 
 -- === Anti-Death ===
