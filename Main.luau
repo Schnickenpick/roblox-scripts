@@ -791,16 +791,16 @@ end)
 -- ============================================================
 -- [[ 21. GHOST MODE ]]
 -- ============================================================
--- 1. Saves player CFrame as OriginPoint on enable.
--- 2. Warps character to the inside of the nearest plot barrier.
--- 3. Tracks per-frame movement delta at the house location and
---    mirrors it onto a proxy at OriginPoint (no constant TP).
--- 4. Proxy Part is parented to Camera — never replicated to server.
--- 5. On disable, warps back to exact OriginPoint.
+-- High-frequency flicker: every Heartbeat —
+--   A) Capture post-physics RealCF + velocities.
+--   B) Update invisible local proxy to RealCF (camera stays stable).
+--   C) Warp HRP to HouseCoord (server registers safe zone, can't be grabbed).
+--   D) Immediately restore HRP to RealCF + velocities (client never moves).
+-- Camera.CameraSubject = proxy so the camera never sees the HRP flicker.
 
-local ghostConn
-local ghostOriginCF = nil   -- CFrame saved when ghost mode was enabled
-local ghostProxy    = nil   -- local-only marker Part, parented to Camera
+local ghostConn    = nil
+local ghostProxy   = nil   -- invisible Part, parented to Camera (local-only, never replicated)
+local ghostHouseCF = nil   -- pre-computed barrier interior CFrame for flicker target
 
 local function findNearestBarrier()
     local hrp = getRoot(); if not hrp then return nil end
@@ -827,19 +827,16 @@ local function startGhostMode()
         S.ghostMode=false; Toggles.GhostMode:SetValue(false); return
     end
 
-    -- 1. Save OriginPoint
-    ghostOriginCF = hrp.CFrame
-
-    -- Compute the inside position (side of barrier further from player)
+    -- Compute the interior position (the side of the barrier furthest from the player)
     local bCF  = pb.CFrame
     local half = pb.Size.Z / 2 + 2
     local pA   = (bCF * CFrame.new(0, 0,  half)).Position
     local pB   = (bCF * CFrame.new(0, 0, -half)).Position
     local insidePt = (pA - hrp.Position).Magnitude > (pB - hrp.Position).Magnitude
                      and pA or pB
-    local houseCF  = CFrame.new(insidePt.X, hrp.Position.Y, insidePt.Z)
+    ghostHouseCF = CFrame.new(insidePt.X, hrp.Position.Y, insidePt.Z)
 
-    -- 4. Create proxy at OriginPoint, parented to Camera (local-only, never replicated)
+    -- Create invisible proxy parented to Camera (never replicated to server)
     if ghostProxy then ghostProxy:Destroy() end
     ghostProxy              = Instance.new("Part")
     ghostProxy.Name         = "GhostProxy"
@@ -848,67 +845,50 @@ local function startGhostMode()
     ghostProxy.CanQuery     = false
     ghostProxy.CanTouch     = false
     ghostProxy.Size         = Vector3.new(2, 5, 1)
-    ghostProxy.CFrame       = ghostOriginCF
-    ghostProxy.Color        = Color3.fromRGB(0, 170, 255)
-    ghostProxy.Material     = Enum.Material.Neon
-    ghostProxy.Transparency = 0.5
+    ghostProxy.CFrame       = hrp.CFrame
+    ghostProxy.Transparency = 1          -- fully invisible
     ghostProxy.CastShadow   = false
-    ghostProxy.Parent       = Camera     -- parented to Camera = local client only
+    ghostProxy.Parent       = Camera     -- Camera children are never replicated
 
-    local bb           = Instance.new("BillboardGui")
-    bb.Size            = UDim2.new(0, 120, 0, 30)
-    bb.StudsOffset     = Vector3.new(0, 4, 0)
-    bb.AlwaysOnTop     = true
-    bb.Parent          = ghostProxy
-    local lbl                    = Instance.new("TextLabel")
-    lbl.Size                     = UDim2.new(1, 0, 1, 0)
-    lbl.BackgroundTransparency   = 1
-    lbl.Text                     = LP.Name .. " (ghost)"
-    lbl.TextColor3               = Color3.fromRGB(0, 200, 255)
-    lbl.TextScaled               = true
-    lbl.Parent                   = bb
+    -- Lock camera onto the proxy so it stays at the player's real position,
+    -- completely unaffected by the per-frame HRP flicker to HouseCoord.
+    Camera.CameraSubject = ghostProxy
 
-    -- 2. Warp character inside the house (one-time teleport, not repeated)
-    hrp.CFrame                  = houseCF
-    hrp.AssemblyLinearVelocity  = Vector3.zero
-    hrp.AssemblyAngularVelocity = Vector3.zero
-
-    -- 3. Each Heartbeat: measure how much the player moved this frame
-    --    and apply the same delta to the proxy so it mirrors movements
-    --    at OriginPoint without any force-teleporting back and forth.
-    local prevPos = hrp.Position
     disconnect(ghostConn)
     ghostConn = RunService.Heartbeat:Connect(function()
         if not S.ghostMode then disconnect(ghostConn); ghostConn = nil; return end
         local root = getRoot(); if not root then return end
 
-        local currPos = root.Position
-        local delta   = currPos - prevPos    -- movement this frame at house
-        prevPos       = currPos
+        -- A) Capture true post-physics state
+        local realCF     = root.CFrame
+        local realLinVel = root.AssemblyLinearVelocity
+        local realAngVel = root.AssemblyAngularVelocity
 
-        -- Mirror the same delta onto the proxy at OriginPoint
-        if ghostProxy and ghostProxy.Parent then
-            ghostProxy.CFrame = ghostProxy.CFrame + delta
-        end
+        -- B) Anchor proxy at real position so camera never moves
+        ghostProxy.CFrame = realCF
+
+        -- C) Warp HRP into the house (server sees this — prevents grabs)
+        root.CFrame = ghostHouseCF
+
+        -- D) Snap HRP straight back; preserve momentum so movement is unaffected
+        root.CFrame                  = realCF
+        root.AssemblyLinearVelocity  = realLinVel
+        root.AssemblyAngularVelocity = realAngVel
     end)
 
-    Notify("Ghost","Ghost Mode ON — warped inside house",3)
+    Notify("Ghost","Ghost Mode ON",3)
 end
 
 local function stopGhostMode()
     disconnect(ghostConn); ghostConn = nil
 
-    -- 5. Warp back to exact OriginPoint
-    local hrp = getRoot()
-    if hrp and ghostOriginCF then
-        hrp.CFrame                  = ghostOriginCF
-        hrp.AssemblyLinearVelocity  = Vector3.zero
-        hrp.AssemblyAngularVelocity = Vector3.zero
-    end
+    -- Restore camera subject to the humanoid
+    local hum = getHum()
+    if hum then Camera.CameraSubject = hum end
 
     if ghostProxy then ghostProxy:Destroy(); ghostProxy = nil end
-    ghostOriginCF = nil
-    Notify("Ghost","Ghost Mode OFF — returned to origin",2)
+    ghostHouseCF = nil
+    Notify("Ghost","Ghost Mode OFF",2)
 end
 
 -- ============================================================
@@ -1633,7 +1613,7 @@ DefLeft:AddToggle("AutoStruggle",{Text="Auto-Struggle",Tooltip="Fires Struggle +
         if not v then local c=getChar(); if c then for _,p in pairs(c:GetChildren()) do if p:IsA("BasePart") then p.Anchored=false end end end end
     end})
 DefLeft:AddToggle("GhostMode",{Text="Ghost Mode",
-    Tooltip="Saves your position, warps you inside the nearest house barrier, and mirrors your movements onto a local proxy. Toggle OFF to return to exact origin.",
+    Tooltip="Every frame: flickers HRP into the nearest house barrier and back so the server can never register a grab. Camera is anchored to a local proxy — no stutter.",
     Default=false,
     Callback=function(v)
         S.ghostMode=v
