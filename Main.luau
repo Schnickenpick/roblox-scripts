@@ -607,7 +607,10 @@ local function startAntiGucci()
     disconnect(antiGucciConn)
     antiGucciConn = RunService.Heartbeat:Connect(function()
         if not root or not hum then return end
-        pcall(function() RS.CharacterEvents.RagdollRemote:FireServer(root,0) end)
+        -- Skip ragdoll while seated in own blobman — firing it would immediately unseat us
+        if not (seat and hum.SeatPart == seat) then
+            pcall(function() RS.CharacterEvents.RagdollRemote:FireServer(root,0) end)
+        end
         if rf>0 then root.CFrame=CFrame.new(safe); rf-=1 end
     end)
     task.spawn(function()
