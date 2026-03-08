@@ -114,14 +114,14 @@ end
 local function spawnBlobman()
     pcall(function()
         RS.MenuToys.SpawnToyRemoteFunction:InvokeServer(
-            "CreatureBlobman", CFrame.new(0,5000000,0), Vector3.new(0,60,0))
+            "CreatureBlobman", CFrame.new(0,-100,0), Vector3.new(0,60,0))
     end)
     task.wait(0.8)
     local f = getToyFolder()
     local b = f and f:FindFirstChild("CreatureBlobman")
     if b then
         local h = b:FindFirstChild("Head")
-        if h then h.CFrame = CFrame.new(0,50000,0); h.Anchored = true end
+        if h then h.CFrame = CFrame.new(0,-100,0); h.Anchored = true end
         Notify("Blobman","Spawned!",2)
     end
     return b
@@ -144,12 +144,12 @@ local function autoSitMyBlob()
         -- Always reposition blobman to sky before trying to sit
         local blobRoot = blob:FindFirstChild("HumanoidRootPart") or blob.PrimaryPart
         if blobRoot then
-            blobRoot.CFrame = CFrame.new(0, 50000, 0)
+            blobRoot.CFrame = CFrame.new(0, -100, 0)
             blobRoot.AssemblyLinearVelocity  = Vector3.zero
             blobRoot.AssemblyAngularVelocity = Vector3.zero
         end
         local head = blob:FindFirstChild("Head")
-        if head then head.CFrame = CFrame.new(0, 50000, 200); head.Anchored = true end
+        if head then head.CFrame = CFrame.new(0, -100, 200); head.Anchored = true end
         local seat = blob:WaitForChild("VehicleSeat", 5)
         if not seat then Notify("Error","No VehicleSeat",2); return end
         task.wait(0.15)
