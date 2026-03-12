@@ -1,8 +1,8 @@
 -- ============================================================
---   PALETTE EXTRACTION SCRIPT  v2
---   Fix: correct toy identification via ThisToysNumber/ToyNumber
---        correct SetNetworkOwner target (toy.Body, toy.Body.CFrame)
---        PartOwner ownership gate before Hold
+--   PALETTE EXTRACTION SCRIPT  v3
+--   Key insight: palette lives at workspace.PlotItems.Plot3.PalletLightBrown
+--   Grab via CreateGrabLine:FireServer(SoundPart, objectSpaceCF)
+--   NOT a spawned toy — no SpawnToyRemoteFunction needed
 -- ============================================================
 
 -- [[ SERVICES ]]
@@ -11,7 +11,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService        = game:GetService("RunService")
 
 -- [[ LOCAL PLAYER ]]
-local LocalPlayer   = Players.LocalPlayer
+local LocalPlayer     = Players.LocalPlayer
 local playerCharacter = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 LocalPlayer.CharacterAdded:Connect(function(c) playerCharacter = c end)
 
@@ -21,25 +21,16 @@ local function GetHRP()
 end
 
 -- [[ REMOTES ]]
-local MenuToys        = ReplicatedStorage:WaitForChild("MenuToys")
-local SpawnToyRF      = MenuToys:WaitForChild("SpawnToyRemoteFunction")
-local DestroyToyRE    = MenuToys:WaitForChild("DestroyToy")
-
 local GrabEvents      = ReplicatedStorage:WaitForChild("GrabEvents")
-local SetNetworkOwner = GrabEvents:WaitForChild("SetNetworkOwner")
+local CreateGrabLine  = GrabEvents:WaitForChild("CreateGrabLine")
 local DestroyGrabLine = GrabEvents:WaitForChild("DestroyGrabLine")
-
--- [[ TOY FOLDER ]]
--- Must be fetched fresh each call; player may have rejoined
-local function GetToyFolder()
-    return workspace:WaitForChild(LocalPlayer.Name .. "SpawnedInToys", 10)
-end
+local SetNetworkOwner = GrabEvents:WaitForChild("SetNetworkOwner")
 
 -- [[ CONSTANTS ]]
-local SCARY_HOUSE_CF = CFrame.new(269.65, -5.43, 440.34)
-local TOY_NAME       = "PalletLightBrown"
-local SPAWN_TIMEOUT  = 8    -- seconds
-local OUTSIDE_OFFSET = CFrame.new(0, 0, -58)  -- studs forward from where we TP'd
+local SCARY_HOUSE_CF  = CFrame.new(269.65, -5.43, 440.34)
+local PALETTE_PATH    = {"PlotItems", "Plot3", "PalletLightBrown"}
+local PALETTE_TIMEOUT = 8   -- seconds to wait for palette to appear in PlotItems
+local OUTSIDE_OFFSET  = CFrame.new(0, 0, -60)  -- studs forward out of the house
 
 -- [[ GLOBAL STORAGE ]]
 getgenv().SavedPalettes = getgenv().SavedPalettes or {}
@@ -64,10 +55,25 @@ local function SetCollisions(model, state)
     end
 end
 
--- ── Plot Claim ───────────────────────────────────────────────
+-- ── Resolve palette from workspace.PlotItems.Plot3 ───────────
+--   Waits up to PALETTE_TIMEOUT seconds for it to appear after
+--   claiming the plot.
+local function WaitForPlotPalette()
+    -- Drill down through the path, waiting at each step
+    local node = workspace
+    for _, name in ipairs(PALETTE_PATH) do
+        node = node:WaitForChild(name, PALETTE_TIMEOUT)
+        if not node then
+            Notify("ERROR: Path broken at '" .. name .. "' in workspace.")
+            return nil
+        end
+    end
+    return node  -- this is the PalletLightBrown Model
+end
+
+-- ── Claim plot via ProximityPrompt ────────────────────────────
 local function ClaimPlot()
     pcall(function()
-        -- Walk up the child list and find the 9th entry regardless of sort order
         local children = workspace.Plots.Plot3.PlotSign:GetChildren()
         local container = children[9]
         if not container then error("child[9] missing") end
@@ -84,131 +90,48 @@ local function ClaimPlot()
             task.wait(0.05)
             prompt.MaxActivationDistance = orig
         else
-            -- ClickDetector fallback
             local cd = pgp:FindFirstChildWhichIsA("ClickDetector")
             if cd then fireclickdetector(cd) end
         end
     end)
-    -- Either claimed or already owned — either outcome lets us continue
 end
 
--- ── Spawn & Identify (VerbalHub pattern) ────────────────────
---   The ONLY reliable way to identify your freshly spawned toy:
---     toy:WaitForChild("ThisToysNumber").Value == ToyFolder.ToyNumber.Value - 1
---   This prevents matching another player's palette of the same name.
-local function SpawnAndWaitForToy(headCF)
-    local ToyFolder = GetToyFolder()
-    if not ToyFolder then
-        Notify("ERROR: SpawnedInToys folder not found.")
-        return nil
-    end
-
-    -- ToyNumber is incremented server-side each time any toy spawns.
-    -- Snapshot the expected next value before we fire the remote.
-    local toyNumValue = ToyFolder:FindFirstChild("ToyNumber")
-    if not toyNumValue then
-        Notify("ERROR: ToyNumber not found in toy folder.")
-        return nil
-    end
-    local expectedNum = toyNumValue.Value  -- our toy will have ThisToysNumber == this value
-
-    local palette  = nil
-    local done     = false
-
-    -- Connect listener BEFORE invoking so we never miss the ChildAdded
-    local conn = ToyFolder.ChildAdded:Connect(function(child)
-        if done or child.Name ~= TOY_NAME then return end
-
-        -- Wait briefly for ThisToysNumber to replicate
-        local numObj = child:WaitForChild("ThisToysNumber", 2)
-        if numObj and numObj.Value == expectedNum then
-            palette = child
-            done    = true
-        end
+-- ── Take network ownership of SoundPart ──────────────────────
+--   Mirrors VerbalHub: FireServer(targetPart, targetPart.CFrame)
+local function ClaimOwnership(soundPart)
+    local ok = pcall(function()
+        SetNetworkOwner:FireServer(soundPart, soundPart.CFrame)
     end)
 
-    -- Spawn on a separate thread so our repeat-loop below isn't blocked
-    task.spawn(function()
-        SpawnToyRF:InvokeServer(TOY_NAME, headCF, Vector3.zero)
-    end)
-
-    local deadline = tick() + SPAWN_TIMEOUT
-    repeat task.wait(0.05) until done or tick() > deadline
-
-    conn:Disconnect()
-
-    if not palette or not palette.Parent then
-        Notify("ERROR: Palette did not spawn within " .. SPAWN_TIMEOUT .. "s.")
-        Notify("Tip: make sure you own PalletLightBrown and have toy slots free.")
-        return nil
+    -- Optional PartOwner confirmation (give it 1.5s to replicate)
+    local partOwner = soundPart:WaitForChild("PartOwner", 1.5)
+    if partOwner and partOwner.Value ~= LocalPlayer.Name then
+        Notify("WARN: PartOwner is '" .. tostring(partOwner.Value) .. "' — may snap back.")
     end
 
-    return palette
+    return ok
 end
 
--- ── Network Ownership (VerbalHub line 336 pattern) ───────────
---   MUST target toy.Body with toy.Body.CFrame — NOT the HRP.
---   Then confirm via PartOwner value before proceeding.
-local function ClaimOwnership(palette)
-    local body = palette:FindFirstChild("Body")
-    if not body then
-        -- Fallback: try PrimaryPart or first BasePart
-        body = palette.PrimaryPart or palette:FindFirstChildWhichIsA("BasePart")
-    end
-    if not body then
-        Notify("WARN: No Body part found; ownership may fail.")
-        return false
-    end
-
-    -- Fire SetNetworkOwner at Body with Body's own CFrame (verbatim from VerbalHub)
-    pcall(function()
-        SetNetworkOwner:FireServer(body, body.CFrame)
-    end)
-
-    -- Wait for PartOwner to replicate and confirm it's ours
-    local partOwner = body:WaitForChild("PartOwner", 2)
-    if partOwner and partOwner.Value == LocalPlayer.Name then
-        return true, body
-    end
-
-    -- PartOwner either didn't appear or belongs to someone else
-    Notify("WARN: PartOwner check failed — item may snap back.")
-    return false, body  -- still return body so Hold can attempt
-end
-
--- ── Hold (message(3).txt Hold() pattern) ─────────────────────
-local function HoldPalette(palette)
-    local holdPart = palette:WaitForChild("HoldPart", 3)
-    if not holdPart then
-        Notify("ERROR: HoldPart not found.")
-        return false
-    end
-
-    local holdRemote = holdPart:WaitForChild("HoldItemRemoteFunction", 3)
-    if not holdRemote then
-        Notify("ERROR: HoldItemRemoteFunction not found.")
-        return false
-    end
-
+-- ── Grab via CreateGrabLine ───────────────────────────────────
+--   Exact pattern from the provided FireServer call:
+--     Event:FireServer(palette.SoundPart, SoundPart.CFrame:ToObjectSpace(HRP.CFrame))
+--   The second arg is the HRP position expressed in SoundPart's local space.
+local function GrabPalette(soundPart, hrp)
+    local objectSpaceCF = soundPart.CFrame:ToObjectSpace(hrp.CFrame)
     local ok, err = pcall(function()
-        holdRemote:InvokeServer(palette, playerCharacter)
+        CreateGrabLine:FireServer(soundPart, objectSpaceCF)
     end)
-
     if not ok then
-        Notify("Hold invoke error: " .. tostring(err))
+        Notify("CreateGrabLine error: " .. tostring(err))
         return false
     end
-    return true, holdPart
+    return true
 end
 
--- ── Drop (message(3).txt Drop() pattern) ─────────────────────
-local function DropPalette(palette, dropCF)
-    local holdPart = palette:FindFirstChild("HoldPart")
-    if not holdPart then return end
-    local dropRemote = holdPart:FindFirstChild("DropItemRemoteFunction")
-    if not dropRemote then return end
+-- ── Release grab line ─────────────────────────────────────────
+local function ReleasePalette(soundPart)
     pcall(function()
-        dropRemote:InvokeServer(palette, dropCF, Vector3.zero)
+        DestroyGrabLine:FireServer(soundPart)
     end)
 end
 
@@ -232,44 +155,53 @@ local function RunExtraction()
         return
     end
 
-    -- ── 1. Teleport ───────────────────────────────────────────
-    Notify("1/7 — Teleporting to Scary House…")
+    -- ── 1. Teleport to Scary House ────────────────────────────
+    Notify("1/6 — Teleporting to Scary House…")
     hrp.CFrame = SCARY_HOUSE_CF
     task.wait(0.5)
 
-    -- ── 2. Claim Plot ─────────────────────────────────────────
-    Notify("2/7 — Claiming Plot 3…")
+    -- ── 2. Claim Plot 3 ───────────────────────────────────────
+    Notify("2/6 — Claiming Plot 3…")
     ClaimPlot()
-    task.wait(0.3)
+    task.wait(0.4)
 
-    -- ── 3. Spawn PalletLightBrown ─────────────────────────────
-    --   Use Head CFrame as spawn point (matches VerbalHub spawnItemCf calls)
-    Notify("3/7 — Spawning " .. TOY_NAME .. "…")
-    local head   = playerCharacter and playerCharacter:FindFirstChild("Head")
-    local spawnCF = head and head.CFrame or hrp.CFrame
-    local palette = SpawnAndWaitForToy(spawnCF)
-    if not palette then isRunning = false return end
-    task.wait(0.2)
-
-    -- ── 4. Network Ownership ─────────────────────────────────
-    Notify("4/7 — Claiming network ownership…")
-    local owned, body = ClaimOwnership(palette)
-    task.wait(0.2)
-
-    -- ── 5. Hold Palette ───────────────────────────────────────
-    Notify("5/7 — Holding palette…")
-    local held = HoldPalette(palette)
-    if not held then
-        -- Ownership may have worked but hold failed; still try to continue
-        Notify("Hold failed — attempting noclip move anyway…")
+    -- ── 3. Find palette in workspace.PlotItems.Plot3 ──────────
+    Notify("3/6 — Waiting for PalletLightBrown in PlotItems…")
+    local palette = WaitForPlotPalette()
+    if not palette then
+        isRunning = false
+        return
     end
-    task.wait(0.25)
 
-    -- ── 6. Noclip (character + palette) ──────────────────────
-    Notify("6/7 — Noclipping through wall…")
+    -- SoundPart is the grab target (confirmed by provided FireServer snippet)
+    local soundPart = palette:WaitForChild("SoundPart", 5)
+    if not soundPart then
+        Notify("ERROR: SoundPart not found on palette.")
+        isRunning = false
+        return
+    end
+    Notify("Found palette at " .. palette:GetFullName())
+    task.wait(0.1)
+
+    -- ── 4. Claim network ownership ────────────────────────────
+    Notify("4/6 — Claiming network ownership via SetNetworkOwner…")
+    ClaimOwnership(soundPart)
+    task.wait(0.2)
+
+    -- ── 5. Grab palette + noclip ──────────────────────────────
+    Notify("5/6 — Grabbing palette via CreateGrabLine…")
+    local grabbed = GrabPalette(soundPart, hrp)
+    if not grabbed then
+        Notify("Grab failed — aborting.")
+        isRunning = false
+        return
+    end
+    task.wait(0.15)
+
+    -- Noclip the palette so it passes through walls
     SetCollisions(palette, false)
 
-    -- Keep character parts noclipped during the move (Cosmic.Luau pattern)
+    -- Noclip character during the move (Cosmic.Luau Stepped pattern)
     local noclipConn = RunService.Stepped:Connect(function()
         if playerCharacter and playerCharacter.Parent then
             for _, p in ipairs(playerCharacter:GetDescendants()) do
@@ -278,28 +210,23 @@ local function RunExtraction()
         end
     end)
 
-    -- ── 7. Move Outside & Store ───────────────────────────────
-    Notify("7/7 — Moving outside & saving…")
+    -- ── 6. Move outside, release, save ───────────────────────
+    Notify("6/6 — Moving outside…")
     local outsideCF = SCARY_HOUSE_CF * OUTSIDE_OFFSET
-    hrp.CFrame      = outsideCF
-    task.wait(0.4)
+    hrp.CFrame = outsideCF
+    task.wait(0.5)  -- give physics time to follow
 
+    -- Stop noclip
     noclipConn:Disconnect()
 
-    -- Drop and restore physics
-    DropPalette(palette, outsideCF)
-    task.wait(0.15)
-
-    -- Release server grab line so we don't hold the slot open
-    pcall(function()
-        if body then DestroyGrabLine:FireServer(body) end
-    end)
+    -- Release the grab line
+    ReleasePalette(soundPart)
+    task.wait(0.1)
 
     -- Restore palette collisions
     SetCollisions(palette, true)
-    task.wait(0.1)
 
-    -- Store
+    -- Save
     table.insert(getgenv().SavedPalettes, palette)
     Notify("✔ Done! Total palettes saved: " .. #getgenv().SavedPalettes)
     isRunning = false
@@ -322,39 +249,22 @@ local Tabs = {
 
 -- ── Main ─────────────────────────────────────────────────────
 local MainBox = Tabs.Main:AddLeftGroupbox("Extraction")
-
-MainBox:AddLabel("TP → Claim → Spawn → Own → Hold → Noclip → Move → Save")
+MainBox:AddLabel("TP → Claim Plot → Find PlotItem → Own → Grab → Noclip → Move → Save")
 MainBox:AddDivider()
 MainBox:AddButton({
     Text    = "▶  Start Extraction",
     Func    = RunExtraction,
-    Tooltip = "Runs the full 7-step sequence",
+    Tooltip = "Grabs PalletLightBrown from workspace.PlotItems.Plot3",
 })
 MainBox:AddDivider()
 
--- ── Palette Status ────────────────────────────────────────────
 local InfoBox = Tabs.Main:AddRightGroupbox("Saved Palettes")
-
 InfoBox:AddButton({
     Text = "Check Count",
     Func = function()
         Notify("Palettes in memory: " .. #getgenv().SavedPalettes)
     end,
 })
-
-InfoBox:AddButton({
-    Text = "Delete Last",
-    Func = function()
-        local t = getgenv().SavedPalettes
-        if #t == 0 then Notify("Nothing saved.") return end
-        local last = table.remove(t)
-        pcall(function()
-            if last and last.Parent then DestroyToyRE:FireServer(last) end
-        end)
-        Notify("Deleted last palette. Remaining: " .. #t)
-    end,
-})
-
 InfoBox:AddButton({
     Text = "Clear All",
     Func = function()
@@ -365,7 +275,6 @@ InfoBox:AddButton({
 
 -- ── Settings ──────────────────────────────────────────────────
 local SetBox = Tabs.Settings:AddLeftGroupbox("Menu")
-
 SetBox:AddButton("Unload", function() Library:Unload() end)
 SetBox:AddLabel("Toggle"):AddKeyPicker("MenuBind", {
     Default = "End",
