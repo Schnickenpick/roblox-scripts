@@ -94,4 +94,4 @@ SetBox:AddButton("Unload", function() Library:Unload() end)
 SetBox:AddLabel("Toggle"):AddKeyPicker("MenuBind", { Default = "End", NoUI = true, Text = "Menu bind" })
 Library.ToggleKeybind = Library.Options.MenuBind
 
-Library:Notify("V4 Ready - Press End")
+Library:Notify("V4")
