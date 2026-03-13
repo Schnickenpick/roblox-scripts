@@ -1,8 +1,11 @@
 -- ============================================================
---   PALETTE BOAT  v4  —  Welded Formation
---   Spawn  → Capture → Hold → Anchor → Weld → Boat Drive
---   Remote logic: message(3).txt verbatim
---   Network ownership: SetNetworkOwner fallback (Cosmic pattern)
+--   PALETTE BOAT  v5
+--   Fixes:
+--     1. Formation — spawn near player THEN move to grid slot
+--        (stops the LookVector*-20 from overriding grid positions)
+--     2. Server-side movement — SetNetworkOwner fired per-BasePart
+--        with CFrame.new(HRP.Position, part.Position) so the server
+--        accepts our CFrame writes and replicates them
 -- ============================================================
 
 -- ── Services ─────────────────────────────────────────────────
@@ -33,25 +36,25 @@ local function GetToyFolder()
 end
 
 -- ── Constants ─────────────────────────────────────────────────
-local TOY_NAME     = "PalletLightBrown"
-local FLEET_SIZE   = 20
-local MASTER_INDEX = 10
+local TOY_NAME      = "PalletLightBrown"
+local FLEET_SIZE    = 20
+local MASTER_INDEX  = 10
 local SPAWN_TIMEOUT = 10
+local COLS          = 5
+local ROWS          = 4
+local SPACING       = 3.5
+local LERP_ALPHA    = 0.2
 
-local COLS    = 5
-local ROWS    = 4
-local SPACING = 3.5
-
--- ── State ─────────────────────────────────────────────────────
+-- ── Global state ──────────────────────────────────────────────
 getgenv().MyPaletteFleet = getgenv().MyPaletteFleet or {}
 local Fleet         = getgenv().MyPaletteFleet
 local MasterPalette = nil
-local boatActive    = false
 local boatHeight    = 0
+local boatActive    = false
 local heartbeatConn = nil
 local isBuilding    = false
 
--- ── Obsidian UI ───────────────────────────────────────────────
+-- ── Obsidian ──────────────────────────────────────────────────
 local Library = loadstring(
     game:HttpGet("https://raw.githubusercontent.com/deividcomsono/Obsidian/main/Library.lua")
 )()
@@ -62,10 +65,10 @@ local function Notify(msg)
 end
 
 -- ============================================================
---   MESSAGE(3).TXT  FUNCTIONS
+--   message(3).txt  FUNCTIONS
 -- ============================================================
 
--- Hold() — HoldItemRemoteFunction:InvokeServer(Food, Character)
+-- Hold() ──────────────────────────────────────────────────────
 local function Hold(Food)
     local HoldPart = Food:WaitForChild("HoldPart", 0.5)
     if not HoldPart then return end
@@ -76,38 +79,50 @@ local function Hold(Food)
     end)
 end
 
--- Drop() — DropItemRemoteFunction:InvokeServer(Food, CF, Vector3.zero)
+-- Drop() ──────────────────────────────────────────────────────
 local function Drop(Food, CF)
     local HoldPart = Food:FindFirstChild("HoldPart")
     if not HoldPart then return end
-    local RigidConstraint = HoldPart:FindFirstChild("RigidConstraint")
-    if not RigidConstraint then return end
+    local RC = HoldPart:FindFirstChild("RigidConstraint")
+    if not RC then return end
     local LeftGrip = Character
         and Character:FindFirstChild("Left Arm")
         and Character["Left Arm"]:FindFirstChild("LeftGripAttachment")
-    if RigidConstraint.Attachment1 == LeftGrip then
-        local DropFunction = HoldPart:FindFirstChild("DropItemRemoteFunction")
-        if DropFunction then
+    if RC.Attachment1 == LeftGrip then
+        local DropFn = HoldPart:FindFirstChild("DropItemRemoteFunction")
+        if DropFn then
             task.spawn(function()
-                DropFunction:InvokeServer(Food, CF or CFrame.new(), Vector3.zero)
+                DropFn:InvokeServer(Food, CF or CFrame.new(), Vector3.zero)
             end)
         end
     end
 end
 
--- Grab() — SetNetworkOwner fallback (message(3).txt + Cosmic pattern)
--- SetNetworkOwner:FireServer(Target, CFrame.new(HRP.Position, Target.Position))
-local function GrabNetworkOwner(palette)
-    local hrp  = GetHRP()
-    local prim = palette.PrimaryPart or palette:FindFirstChildWhichIsA("BasePart")
-    if not prim or not hrp then return end
-    pcall(function()
-        SetNetworkOwner:FireServer(prim, CFrame.new(hrp.Position, prim.Position))
-    end)
+-- SetNetworkOwner — message(3).txt Grab() signature:
+--   SetNetworkOwner:FireServer(Target, CFrame.new(HRP.Position, Target.Position))
+-- Called per BasePart so the server grants us ownership of every
+-- physics body in the model, allowing our CFrame writes to replicate.
+local function ClaimOwnership(model)
+    local hrp = GetHRP()
+    if not hrp then return end
+    for _, part in ipairs(model:GetDescendants()) do
+        if part:IsA("BasePart") then
+            pcall(function()
+                SetNetworkOwner:FireServer(
+                    part,
+                    CFrame.new(hrp.Position, part.Position)
+                )
+            end)
+        end
+    end
 end
 
--- Spawn() — message(3).txt pattern with VerbalHub ToyNumber gate
-local function SpawnOnePalette(spawnCF)
+-- Spawn() — message(3).txt ChildAdded pattern + VerbalHub ToyNumber gate.
+-- NOTE: We intentionally pass the HRP CFrame as the spawn point, NOT the
+-- grid offset — the game's NewCFrame = CF + CF.LookVector*-20 means it
+-- lands near the player regardless.  We reposition to the grid slot AFTER
+-- capture (see BuildFleet).
+local function SpawnOnePalette()
     local folder = GetToyFolder()
     if not folder then return nil end
 
@@ -117,6 +132,7 @@ local function SpawnOnePalette(spawnCF)
     local result = nil
     local done   = false
 
+    -- Listener connected BEFORE invoke so we never miss the child
     local conn = folder.ChildAdded:Connect(function(child)
         if done or child.Name ~= TOY_NAME then return end
         if expectedNum then
@@ -131,9 +147,9 @@ local function SpawnOnePalette(spawnCF)
         end
     end)
 
-    -- message(3).txt: NewCFrame = CF + CF.LookVector * -20
     local hrp   = GetHRP()
-    local base  = spawnCF or (hrp and hrp.CFrame or CFrame.new())
+    local base  = hrp and hrp.CFrame or CFrame.new()
+    -- message(3).txt: NewCFrame = CF + CF.LookVector*-20
     local newCF = base + base.LookVector * -20
 
     task.spawn(function()
@@ -149,7 +165,7 @@ local function SpawnOnePalette(spawnCF)
 end
 
 -- ============================================================
---   GRID OFFSET  —  5×4 deck layout
+--   GRID MATH  —  5 × 4 deck
 -- ============================================================
 
 local function GridOffset(i)
@@ -161,6 +177,21 @@ local function GridOffset(i)
     return CFrame.new(x, y, z)
 end
 
+-- Move every BasePart of a model to a target CFrame.
+-- Uses SetPrimaryPartCFrame when available so relative offsets
+-- between internal parts are preserved.
+local function MovePalette(palette, targetCF)
+    if not palette or not palette.Parent then return end
+    if palette.PrimaryPart then
+        palette:SetPrimaryPartCFrame(targetCF)
+    else
+        -- Flat model — move every BasePart directly
+        for _, p in ipairs(palette:GetDescendants()) do
+            if p:IsA("BasePart") then p.CFrame = targetCF end
+        end
+    end
+end
+
 -- ============================================================
 --   WELD PHASE
 -- ============================================================
@@ -169,29 +200,33 @@ local function WeldFleet()
     local masterIdx = math.min(MASTER_INDEX, #Fleet)
     MasterPalette   = Fleet[masterIdx]
 
-    if not MasterPalette or not MasterPalette.PrimaryPart then
-        Notify("ERROR: Master palette has no PrimaryPart.")
+    if not MasterPalette then
+        Notify("ERROR: no master palette at index " .. masterIdx)
         return false
     end
 
     local masterPart = MasterPalette.PrimaryPart
-    Notify("Welding fleet to master palette #" .. masterIdx .. "…")
+                    or MasterPalette:FindFirstChildWhichIsA("BasePart")
+    if not masterPart then
+        Notify("ERROR: master has no BasePart")
+        return false
+    end
+
+    Notify("Welding to master #" .. masterIdx .. "…")
 
     for i, palette in ipairs(Fleet) do
-        if i == masterIdx then continue end
-        if not palette or not palette.Parent then continue end
+        if i == masterIdx or not palette or not palette.Parent then continue end
 
         local slavePart = palette.PrimaryPart
                        or palette:FindFirstChildWhichIsA("BasePart")
         if not slavePart then continue end
 
-        -- Part0 = master, Part1 = slave; parented to master model
-        local weld   = Instance.new("WeldConstraint")
-        weld.Part0   = masterPart
-        weld.Part1   = slavePart
-        weld.Parent  = MasterPalette
+        local weld  = Instance.new("WeldConstraint")
+        weld.Part0  = masterPart
+        weld.Part1  = slavePart
+        weld.Parent = MasterPalette
 
-        -- Unanchor slaves — weld holds them relative to master
+        -- Slaves unanchored — weld locks them to master
         for _, p in ipairs(palette:GetDescendants()) do
             if p:IsA("BasePart") then
                 p.Anchored   = false
@@ -200,7 +235,7 @@ local function WeldFleet()
         end
     end
 
-    -- Master stays anchored; Heartbeat drives it
+    -- Master anchored — driven by Heartbeat
     for _, p in ipairs(MasterPalette:GetDescendants()) do
         if p:IsA("BasePart") then
             p.Anchored   = true
@@ -208,32 +243,36 @@ local function WeldFleet()
         end
     end
 
-    Notify("Weld complete.")
+    Notify("Weld done. Fleet moves as one object.")
     return true
 end
 
 -- ============================================================
---   BOAT DRIVE  —  Heartbeat, master palette only
+--   BOAT DRIVE  —  Heartbeat on master only
 -- ============================================================
 
 local function StartBoatDrive()
     if heartbeatConn then heartbeatConn:Disconnect() end
-    if not MasterPalette or not MasterPalette.PrimaryPart then
-        Notify("No master palette — build the fleet first.")
+    if not MasterPalette then
+        Notify("Build fleet first.")
         return
     end
 
     local masterPart = MasterPalette.PrimaryPart
+                    or MasterPalette:FindFirstChildWhichIsA("BasePart")
+    if not masterPart then return end
 
     heartbeatConn = RunService.Heartbeat:Connect(function()
         local hrp = GetHRP()
-        if not hrp or not masterPart or not masterPart.Parent then return end
+        if not hrp or not masterPart.Parent then return end
 
-        -- Target position: offset below HRP
-        local targetCF = hrp.CFrame * CFrame.new(0, -3 + boatHeight, 0)
+        -- Target: centred under HRP at chosen height
+        local target = hrp.CFrame * CFrame.new(0, -3 + boatHeight, 0)
 
-        -- Smooth lerp — welds instantly carry the rest of the fleet
-        masterPart.CFrame = masterPart.CFrame:Lerp(targetCF, 0.25)
+        -- Lerp so movement is smooth even after teleports
+        -- Writing masterPart.CFrame replicates because we called
+        -- SetNetworkOwner for all parts during BuildFleet
+        masterPart.CFrame = masterPart.CFrame:Lerp(target, LERP_ALPHA)
     end)
 
     Notify("Boat Drive ON.")
@@ -248,19 +287,18 @@ local function StopBoatDrive()
 end
 
 -- ============================================================
---   BUILD FLEET  —  main entry point
+--   BUILD FLEET
 -- ============================================================
 
 local function BuildFleet()
-    if isBuilding then Notify("Already building — wait.") return end
-
+    if isBuilding then Notify("Already building.") return end
     local hrp = GetHRP()
-    if not hrp then Notify("ERROR: No character.") return end
+    if not hrp then Notify("No character.") return end
 
     StopBoatDrive()
     boatActive = false
 
-    -- Destroy old fleet
+    -- Destroy previous fleet
     for _, palette in ipairs(Fleet) do
         pcall(function()
             if palette and palette.Parent then
@@ -274,15 +312,16 @@ local function BuildFleet()
     MasterPalette = nil
 
     isBuilding = true
-    Notify("Building fleet of " .. FLEET_SIZE .. " palettes…")
+    Notify("Spawning " .. FLEET_SIZE .. " palettes…")
 
-    -- ── Per-palette: Spawn → Hold → NetworkOwner → Anchor ─────
+    -- ── Phase 1: Spawn all palettes near the player ───────────
+    -- We intentionally do NOT try to spawn at grid positions — the
+    -- server ignores our CFrame and applies LookVector*-20 anyway.
+    -- Instead: spawn → capture → own → anchor, then mass-reposition.
     for i = 1, FLEET_SIZE do
         Notify(i .. "/" .. FLEET_SIZE .. "…")
 
-        local offset   = GridOffset(i)
-        local targetCF = hrp.CFrame * offset
-        local palette  = SpawnOnePalette(targetCF)
+        local palette = SpawnOnePalette()
 
         if not palette then
             Notify("✘ Slot " .. i .. " timed out.")
@@ -291,36 +330,29 @@ local function BuildFleet()
             continue
         end
 
-        -- STEP 3: Hold — server registers us as controller
+        -- Claim server network ownership per-part (message(3).txt Grab signature)
+        ClaimOwnership(palette)
+        task.wait(0.06)
+
+        -- Hold via HoldItemRemoteFunction (message(3).txt Hold)
         Hold(palette)
         task.wait(0.08)
 
-        -- SetNetworkOwner fallback
-        GrabNetworkOwner(palette)
-        task.wait(0.05)
-
-        -- STEP 4: Move to grid slot and anchor
-        if palette.PrimaryPart then
-            palette:SetPrimaryPartCFrame(targetCF)
-        else
-            for _, p in ipairs(palette:GetDescendants()) do
-                if p:IsA("BasePart") then p.CFrame = targetCF end
-            end
-        end
-
+        -- Disable collisions; anchor temporarily while remaining
+        -- palettes spawn so they don't float / fling
         for _, p in ipairs(palette:GetDescendants()) do
             if p:IsA("BasePart") then
-                p.Anchored   = true
                 p.CanCollide = false
+                p.Anchored   = true
             end
         end
 
         table.insert(Fleet, palette)
-        Notify("✔ Palette " .. i .. " anchored.")
-        task.wait(0.12)
+        Notify("✔ " .. i .. " captured.")
+        task.wait(0.1)
     end
 
-    -- Strip false placeholders
+    -- Strip failed slots
     local clean = {}
     for _, v in ipairs(Fleet) do
         if v then table.insert(clean, v) end
@@ -334,13 +366,25 @@ local function BuildFleet()
         return
     end
 
-    -- ── Weld phase ────────────────────────────────────────────
+    -- ── Phase 2: Reposition into formation ───────────────────
+    -- Now all palettes are captured and owned.  We move them to
+    -- their grid slots.  Because we have network ownership the
+    -- CFrame write replicates to every client / the server.
+    Notify("Positioning fleet into formation…")
+    hrp = GetHRP()  -- refresh after spawning delay
+    for i, palette in ipairs(Fleet) do
+        local targetCF = hrp.CFrame * GridOffset(i)
+        MovePalette(palette, targetCF)
+    end
+    task.wait(0.2)  -- let physics settle
+
+    -- ── Phase 3: Weld ─────────────────────────────────────────
+    Notify("Welding fleet…")
     local ok = WeldFleet()
     if not ok then isBuilding = false return end
 
-    Notify("Fleet ready! " .. #Fleet .. " palettes. Enable Boat Drive.")
+    Notify("Fleet ready — " .. #Fleet .. " palettes. Toggle Boat Drive!")
     isBuilding = false
-
     if boatActive then StartBoatDrive() end
 end
 
@@ -360,16 +404,16 @@ local Tabs = {
     Settings = Window:AddTab("Settings"),
 }
 
--- ── Main Tab ──────────────────────────────────────────────────
+-- ── Main ──────────────────────────────────────────────────────
 local BuildBox = Tabs.Main:AddLeftGroupbox("Fleet Builder")
 
-BuildBox:AddLabel("Spawn → Hold → Anchor → Weld → Drive")
+BuildBox:AddLabel("Spawn → Own → Hold → Anchor → Formation → Weld")
 BuildBox:AddDivider()
 
 BuildBox:AddButton({
     Text    = "▶  Build Welded Fleet",
     Func    = function() task.spawn(BuildFleet) end,
-    Tooltip = "Spawns " .. FLEET_SIZE .. " palettes then welds all to palette #" .. MASTER_INDEX,
+    Tooltip = "Spawns " .. FLEET_SIZE .. " palettes, claims ownership, positions into 5×4 grid, welds to master #" .. MASTER_INDEX,
 })
 
 BuildBox:AddButton({
@@ -393,53 +437,51 @@ BuildBox:AddButton({
 local InfoBox = Tabs.Main:AddRightGroupbox("Status")
 
 InfoBox:AddButton({
-    Text = "Fleet Count",
+    Text = "Fleet Info",
     Func = function()
-        local master = MasterPalette ~= nil and "YES" or "NO"
-        Notify("Fleet: " .. #Fleet .. " palettes | Master welded: " .. master)
+        Notify(
+            "Fleet: " .. #Fleet ..
+            " | Master: " .. tostring(MasterPalette ~= nil) ..
+            " | Drive: " .. tostring(boatActive)
+        )
     end,
 })
 
--- ── Drive Tab ─────────────────────────────────────────────────
+-- ── Drive ─────────────────────────────────────────────────────
 local DriveBox = Tabs.Drive:AddLeftGroupbox("Boat Drive")
 
-DriveBox:AddLabel("Master palette lerps to HRP. Welds carry everything else.")
+DriveBox:AddLabel("Only master palette moves. WeldConstraints carry the rest.")
 DriveBox:AddDivider()
 
-DriveBox:AddToggle("BoatDriveToggle", {
+DriveBox:AddToggle("BoatToggle", {
     Text    = "Activate Boat Drive",
     Default = false,
-    Tooltip = "Heartbeat lerps only the master palette — welds do the rest",
+    Tooltip = "Heartbeat lerps master under HRP — welds do the rest",
     Callback = function(val)
         boatActive = val
-        if val then
-            StartBoatDrive()
-        else
-            StopBoatDrive()
-        end
+        if val then StartBoatDrive() else StopBoatDrive() end
     end,
 })
 
 DriveBox:AddDivider()
 
-DriveBox:AddSlider("BoatHeightSlider", {
+DriveBox:AddSlider("HeightSlider", {
     Text     = "Boat Height",
     Default  = 0,
     Min      = -10,
     Max      = 10,
     Rounding = 1,
-    Tooltip  = "Raise or lower the deck (updates live if Drive is on)",
+    Tooltip  = "Raise/lower the deck relative to your feet",
     Callback = function(val)
         boatHeight = val
-        Notify("Height: " .. val)
+        Notify("Height → " .. val)
     end,
 })
 
-local PhysicsBox = Tabs.Drive:AddRightGroupbox("Physics Tools")
+local PhysBox = Tabs.Drive:AddRightGroupbox("Physics Tools")
 
-PhysicsBox:AddButton({
+PhysBox:AddButton({
     Text    = "Re-apply Noclip",
-    Tooltip = "Force CanCollide=false on every fleet part",
     Func    = function()
         for _, p in ipairs(Fleet) do
             if p and p.Parent then
@@ -448,25 +490,35 @@ PhysicsBox:AddButton({
                 end
             end
         end
-        Notify("Noclip re-applied to " .. #Fleet .. " palettes.")
+        Notify("Noclip re-applied.")
     end,
 })
 
-PhysicsBox:AddButton({
-    Text    = "Re-weld Fleet",
-    Tooltip = "Strips old WeldConstraints and re-creates them",
+PhysBox:AddButton({
+    Text    = "Re-claim Ownership",
+    Tooltip = "Re-fires SetNetworkOwner for all fleet parts",
     Func    = function()
-        if #Fleet == 0 then Notify("No fleet to re-weld.") return end
-        if MasterPalette then
-            for _, w in ipairs(MasterPalette:GetDescendants()) do
-                if w:IsA("WeldConstraint") then w:Destroy() end
-            end
+        for _, p in ipairs(Fleet) do
+            if p and p.Parent then ClaimOwnership(p) end
         end
-        WeldFleet()
+        Notify("Ownership re-claimed for " .. #Fleet .. " palettes.")
     end,
 })
 
--- ── Settings Tab ──────────────────────────────────────────────
+PhysBox:AddButton({
+    Text    = "Snap to Formation",
+    Tooltip = "Immediately moves all palettes back to grid offsets",
+    Func    = function()
+        local hrp = GetHRP()
+        if not hrp then Notify("No character.") return end
+        for i, palette in ipairs(Fleet) do
+            MovePalette(palette, hrp.CFrame * GridOffset(i))
+        end
+        Notify("Snapped " .. #Fleet .. " palettes to formation.")
+    end,
+})
+
+-- ── Settings ──────────────────────────────────────────────────
 local SetBox = Tabs.Settings:AddLeftGroupbox("Menu")
 SetBox:AddButton("Unload", function() Library:Unload() end)
 SetBox:AddLabel("Toggle Keybind"):AddKeyPicker("MenuBind", {
@@ -476,4 +528,4 @@ SetBox:AddLabel("Toggle Keybind"):AddKeyPicker("MenuBind", {
 })
 Library.ToggleKeybind = Library.Options.MenuBind
 
-Notify("Palette Boat loaded — hit Build Welded Fleet to start!")
+Notify("Palette Boat v5 loaded — Build Fleet to begin!")
