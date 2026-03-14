@@ -77,39 +77,27 @@ local function getToyFolder()
     return Workspace:FindFirstChild(LP.Name .. "SpawnedInToys")
 end
 
--- Wait up to `timeout` seconds for the toy folder to exist (created on first spawn)
 local function waitForToyFolder(timeout)
     timeout = timeout or 8
     local folder = getToyFolder()
     if folder then return folder end
-    -- The folder is created server-side on first toy spawn, so WaitForChild it
     local ok, result = pcall(function()
         return Workspace:WaitForChild(LP.Name .. "SpawnedInToys", timeout)
     end)
     return ok and result or nil
 end
 
--- Find a nil-instance toy by name for DestroyToy (toys live in nil after spawning)
-local function findNilToy(name)
-    for _, obj in ipairs(getnilinstances()) do
-        if obj.Name == name and obj:IsA("Model") then
-            return obj
-        end
-    end
-    return nil
-end
-
 -- ============================================================
 -- [[ 5. BOARD CONSTANTS ]]
 -- ============================================================
 
--- 9 columns × 9 rows  (each pallet ≈ 3 block widths → 3 pallets = 9 cols / 9 rows)
 local COLS       = 9
 local ROWS       = 9
-local BLOCK_SIZE = 2   -- studs per grid cell (one tetracube sub-block ≈ 2 studs)
+local BLOCK_SIZE = 2  -- studs per cell
 
--- Piece shape definitions: list of {dcol, drow} offsets from anchor cell
--- All "flat" — pieces lay in the XZ plane, row increases toward the player
+-- Each Tetracube is one single toy that occupies grid cells.
+-- The shapes below define which cells are blocked for collision.
+-- All pieces are treated as a single model — one toy per piece.
 local PIECE_SHAPES = {
     TetracubeI = {{0,0},{1,0},{2,0},{3,0}},
     TetracubeO = {{0,0},{1,0},{0,1},{1,1}},
@@ -120,7 +108,11 @@ local PIECE_SHAPES = {
     TetracubeJ = {{0,0},{1,0},{2,0},{0,1}},
 }
 
--- Maximum column offset in each piece (used for right-wall check)
+local PIECE_NAMES = {
+    "TetracubeI","TetracubeO","TetracubeT",
+    "TetracubeS","TetracubeZ","TetracubeL","TetracubeJ"
+}
+
 local function pieceMaxDcol(name)
     local max = 0
     for _, o in ipairs(PIECE_SHAPES[name] or {}) do
@@ -129,62 +121,39 @@ local function pieceMaxDcol(name)
     return max
 end
 
-local PIECE_NAMES = {
-    "TetracubeI","TetracubeO","TetracubeT",
-    "TetracubeS","TetracubeZ","TetracubeL","TetracubeJ"
-}
-
 -- ============================================================
 -- [[ 6. GAME STATE ]]
 -- ============================================================
 
 local S = { running = false, gameOver = false }
 
--- Grid[row][col] = landed model or nil
 local Grid = {}
 local function clearGrid()
     Grid = {}
-    for r = 0, ROWS - 1 do
-        Grid[r] = {}
-    end
+    for r = 0, ROWS - 1 do Grid[r] = {} end
 end
 clearGrid()
 
--- Active falling piece
-local Active = { model = nil, name = "", col = 3, row = 0 }
-
--- All spawned models (pieces + borders) for cleanup
+local Active      = { model = nil, name = "", col = 3, row = 0 }
 local LandedModels = {}
 local BorderModels = {}
-
--- Board origin CFrame (set when game starts)
-local BoardOrigin = nil
-
--- Heartbeat connection handle + fall timer
-local fallConn  = nil
-local fallTimer = 0
-
--- Camera state saved before game
-local origCamType = nil
-local origCamCF   = nil
-
--- Stats
+local BoardOrigin  = nil
+local fallConn     = nil
+local fallTimer    = 0
+local advancing    = false
+local origCamType  = nil
 local linesCleared = 0
 
--- Label handles (assigned after UI is built)
 local LblState, LblPiece, LblCol, LblRow, LblLines
-local startBtn   -- start/stop button handle
+local startBtn
 
 -- ============================================================
 -- [[ 7. COORDINATE SYSTEM ]]
 -- ============================================================
 
--- Maps grid (col, row) → world CFrame (flat on XZ plane)
--- BoardOrigin.RightVector = col direction (+col = right from player's view)
--- BoardOrigin.LookVector  = row direction (+row = toward player)
--- Row 0 = far/spawn end   Row 8 = near/player end
--- The -90° X rotation lays the piece model flat on the ground (models stand
--- upright by default; rotating around X tips them onto the XZ plane).
+-- FLAT_ROT: lay the Tetracube model flat on the ground (XZ plane).
+-- Baked into every spawn CFrame. After spawn, the model's PrimaryPart
+-- CFrame already includes this rotation, so setModelCFrame preserves it.
 local FLAT_ROT = CFrame.Angles(-math.pi / 2, 0, 0)
 
 local function gridToWorld(col, row)
@@ -199,9 +168,9 @@ end
 -- ============================================================
 
 local function isCellBlocked(col, row)
-    if col < 0 or col >= COLS then return true end   -- walls
-    if row >= ROWS             then return true end   -- floor (player side)
-    if row < 0                 then return false end  -- above board = open
+    if col < 0 or col >= COLS then return true end
+    if row >= ROWS             then return true end
+    if row < 0                 then return false end
     return Grid[row][col] ~= nil
 end
 
@@ -216,7 +185,7 @@ end
 local function canMoveLeft()
     if not Active.model then return false end
     for _, c in ipairs(getPieceCells(Active.col, Active.row, Active.name)) do
-        if isCellBlocked(c[1] - 1, c[2]) then return false end
+        if isCellBlocked(c[1]-1, c[2]) then return false end
     end
     return true
 end
@@ -224,7 +193,7 @@ end
 local function canMoveRight()
     if not Active.model then return false end
     for _, c in ipairs(getPieceCells(Active.col, Active.row, Active.name)) do
-        if isCellBlocked(c[1] + 1, c[2]) then return false end
+        if isCellBlocked(c[1]+1, c[2]) then return false end
     end
     return true
 end
@@ -232,48 +201,90 @@ end
 local function canAdvance()
     if not Active.model then return false end
     for _, c in ipairs(getPieceCells(Active.col, Active.row, Active.name)) do
-        if isCellBlocked(c[1], c[2] + 1) then return false end
+        if isCellBlocked(c[1], c[2]+1) then return false end
     end
     return true
 end
 
 -- ============================================================
--- [[ 9. OWNERSHIP ]]
+-- [[ 9. REPLICATION CORE ]]
 -- ============================================================
 
--- Full claim: grab+own+ungrab. No HRP teleport — pieces are placed near
--- the player already and we don't want jarring TP every move.
+-- Step 1: Anchor every BasePart so physics engine won't fight our CFrame writes.
+--         This MUST happen before any CFrame assignment.
+local function anchorModel(model)
+    if not model then return end
+    for _, p in ipairs(model:GetDescendants()) do
+        if p:IsA("BasePart") then p.Anchored = true end
+    end
+end
+
+-- Step 2: Move every BasePart directly by offset from PrimaryPart.
+--         Never use SetPrimaryPartCFrame (triggers physics, causes flicker).
+--         Model must be anchored first.
+local function setModelCFrame(model, targetCF)
+    if not model then return end
+    local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+    if not primary then return end
+
+    if model.PrimaryPart then
+        local invPrimary = primary.CFrame:Inverse()
+        for _, p in ipairs(model:GetDescendants()) do
+            if p:IsA("BasePart") then
+                p.CFrame = targetCF * (invPrimary * p.CFrame)
+            end
+        end
+    else
+        primary.CFrame = targetCF
+    end
+end
+
+-- Step 3: Claim network ownership.
+--         TP HRP point-blank (range check), fire grab remotes, restore HRP.
+--         Only called once per action (spawn / move / lock), NOT every frame.
+local savedHRPCF = nil  -- global save so nested calls don't clobber it
+
 local function claimOwnership(model)
     if not model then return end
+    local hrp  = getRoot()
+    if not hrp then return end
     local part = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
     if not part then return end
+
+    -- Save position if not already saved by a parent call
+    local isMine = (savedHRPCF == nil)
+    if isMine then savedHRPCF = hrp.CFrame end
+
+    hrp.CFrame = part.CFrame * CFrame.new(0, 3, 0)
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    task.wait(0.06)
+
     pcall(function()
         if Remotes.CreateGrabLine  then Remotes.CreateGrabLine:FireServer(part, part.CFrame)  end
         if Remotes.SetNetworkOwner then Remotes.SetNetworkOwner:FireServer(part, part.CFrame) end
         if Remotes.DestroyGrabLine then Remotes.DestroyGrabLine:FireServer(part)              end
     end)
-end
+    task.wait(0.04)
 
--- Lightweight per-tick refresh: SetNetworkOwner only, no grab lines
-local function refreshOwnership(model)
-    if not model or not Remotes.SetNetworkOwner then return end
-    local part = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
-    if not part then return end
-    pcall(function() Remotes.SetNetworkOwner:FireServer(part, part.CFrame) end)
+    if isMine then
+        hrp.CFrame = savedHRPCF
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        savedHRPCF = nil
+    end
 end
 
 -- ============================================================
--- [[ 10. MODEL MOVEMENT ]]
+-- [[ 10. APPLY PIECE POSITION ]]
 -- ============================================================
 
+-- Full move sequence: claim → anchor → set CFrame.
+-- The anchor is already set from spawn, but we call again for safety.
 local function applyPieceCFrame()
     if not Active.model then return end
     local target = gridToWorld(Active.col, Active.row)
-    if Active.model.PrimaryPart then
-        Active.model:SetPrimaryPartCFrame(target)
-    else
-        Active.model:MoveTo(target.Position)
-    end
+    anchorModel(Active.model)      -- ensure anchored
+    claimOwnership(Active.model)   -- TP point-blank, grab, restore
+    setModelCFrame(Active.model, target)
 end
 
 -- ============================================================
@@ -281,13 +292,7 @@ end
 -- ============================================================
 
 local function updateStatus()
-    if LblState then
-        LblState:SetText(
-            S.gameOver and "GAME OVER ✗"
-            or S.running and "Running ▶"
-            or "Stopped ■"
-        )
-    end
+    if LblState then LblState:SetText(S.gameOver and "GAME OVER ✗" or S.running and "Running ▶" or "Stopped ■") end
     if LblPiece then LblPiece:SetText("Piece: " .. (Active.name ~= "" and Active.name:gsub("Tetracube","") or "---")) end
     if LblCol   then LblCol:SetText(  "Col:   " .. (Active.model and tostring(Active.col) or "---")) end
     if LblRow   then LblRow:SetText(  "Row:   " .. (Active.model and tostring(Active.row) or "---")) end
@@ -295,45 +300,33 @@ local function updateStatus()
 end
 
 -- ============================================================
--- [[ 12. BOARD SETUP ]]
+-- [[ 12. SPAWN HELPER ]]
 -- ============================================================
 
--- Teleport HRP to a world position for the duration of a callback, then restore.
--- Used to pass the server range check on every spawn/ownership call.
-local function atPosition(worldPos, fn)
-    local hrp = getRoot()
-    if not hrp then return fn() end
-    local saved = hrp.CFrame
-    hrp.CFrame = CFrame.new(worldPos)
-    task.wait(0.05)
-    local result = { fn() }
-    task.wait(0.05)
-    hrp.CFrame = saved
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    return table.unpack(result)
-end
-
--- Returns the world-space center of the board (used as TP point during spawns)
-local function boardCenter()
-    if not BoardOrigin then return Vector3.new(0, 0, 0) end
-    return (BoardOrigin * CFrame.new(
-        COLS * BLOCK_SIZE / 2,
-        3,   -- slightly above ground so we land cleanly
-        ROWS * BLOCK_SIZE / 2
-    )).Position
-end
-
+-- Spawns a single toy at a world CFrame.
+-- IMPORTANT: This BLOCKS the calling thread (no task.spawn wrapper around InvokeServer).
+-- The caller must already be running in a task.spawn context.
+-- We TP the HRP to the spawn point first so the server range check passes.
 local function spawnToyAt(name, cf, retries)
     if not Remotes.SpawnToy then return nil end
     retries = retries or 3
 
+    local hrp   = getRoot()
+    local saved = hrp and hrp.CFrame
+
     for attempt = 1, retries do
-        -- Ensure toy folder exists (created on very first spawn)
+        -- TP to spawn point
+        if hrp then
+            hrp.CFrame = CFrame.new(cf.Position + Vector3.new(0, 3, 0))
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            task.wait(0.06)
+        end
+
+        -- Get or wait for toy folder
         local folder = waitForToyFolder(6)
+        local toy    = nil
 
-        local toy = nil
-
-        -- ChildAdded BEFORE invoking — never miss the event
+        -- Connect ChildAdded BEFORE InvokeServer to avoid race condition
         local conn
         if folder then
             conn = folder.ChildAdded:Connect(function(child)
@@ -341,54 +334,65 @@ local function spawnToyAt(name, cf, retries)
             end)
         end
 
-        -- Spawn the toy. The CFrame already encodes flat orientation via the
-        -- rotation baked into gridToWorld (BoardOrigin is on the XZ plane).
-        -- Third arg Vector3.zero = use the CFrame's own rotation (no extra spin).
-        task.spawn(function()
-            pcall(function()
-                Remotes.SpawnToy:InvokeServer(name, cf, Vector3.zero)
-            end)
+        -- InvokeServer blocks — that's correct, gives server time to create toy
+        pcall(function()
+            Remotes.SpawnToy:InvokeServer(name, cf, Vector3.zero)
         end)
 
-        -- If folder didn't exist before, try to get it now
+        -- Folder might have been created by first InvokeServer
         if not folder then
-            folder = waitForToyFolder(6)
-            if folder and not conn then
+            folder = waitForToyFolder(4)
+            if folder then
                 conn = folder.ChildAdded:Connect(function(child)
                     if child.Name == name then toy = child end
                 end)
             end
         end
 
-        -- Scan existing children in case it arrived instantly
+        -- Scan existing children (toy may have arrived during InvokeServer)
         if folder and not toy then
             for _, child in ipairs(folder:GetChildren()) do
                 if child.Name == name then toy = child; break end
             end
         end
 
-        -- Wait up to 6 s
+        -- Wait a bit more for replication lag
         local t = tick()
-        repeat task.wait(0.05) until toy or (tick() - t > 6)
+        repeat task.wait(0.05) until toy or (tick() - t > 2)
         if conn then conn:Disconnect() end
 
-        if toy then return toy end
+        -- Restore HRP before returning
+        if hrp and saved then
+            hrp.CFrame = saved
+            hrp.AssemblyLinearVelocity = Vector3.zero
+        end
 
+        if toy then return toy end
         Notify("Tetris", "Spawn attempt " .. attempt .. " failed, retrying...", 2)
         task.wait(0.3)
     end
 
+    -- Final restore
+    if hrp and saved then
+        hrp.CFrame = saved
+        hrp.AssemblyLinearVelocity = Vector3.zero
+    end
     return nil
 end
+
+-- ============================================================
+-- [[ 13. BOARD SETUP ]]
+-- ============================================================
 
 local function initBoard()
     local hrp = getRoot()
     if not hrp then return false end
 
-    -- Place board origin 18 studs ahead of player, on the ground
+    -- Board origin: 18 studs in front of player at ground level.
+    -- BoardOrigin.RightVector = +col, BoardOrigin.LookVector = +row (toward player).
     local fwd     = hrp.CFrame.LookVector
     fwd           = Vector3.new(fwd.X, 0, fwd.Z).Unit
-    local groundY = hrp.Position.Y - 3   -- approximate ground level
+    local groundY = hrp.Position.Y - 3
 
     local pos = Vector3.new(
         hrp.Position.X + fwd.X * 18,
@@ -398,62 +402,62 @@ local function initBoard()
     local yaw = math.atan2(fwd.X, fwd.Z)
     BoardOrigin = CFrame.new(pos) * CFrame.Angles(0, yaw, 0)
 
-    -- Board is 9×9 blocks = 18×18 studs. Each pallet ≈ 6 studs → 3 pallets per side.
+    -- U-shaped border (open top):
+    --   Left column  (3 pallets, each ~6 studs, running along Z/row axis)
+    --   Right column (3 pallets, same)
+    --   Bottom row   (3 pallets, running along X/col axis, player-near side)
     local PS = 6  -- pallet size in studs
+    local bw = COLS * BLOCK_SIZE   -- 18 studs total board width
+    local bd = ROWS * BLOCK_SIZE   -- 18 studs total board depth
 
-    -- Teleport to board center once so ALL spawns pass the range check
-    local center   = boardCenter()
-    local savedHRP = hrp.CFrame
-    hrp.CFrame = CFrame.new(center)
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    task.wait(0.1)
+    local borders = {}
+    for i = 0, 2 do
+        local zOff = (i + 0.5) * PS
+        -- Left wall
+        table.insert(borders, BoardOrigin * CFrame.new(-PS * 0.5, 0, zOff) * FLAT_ROT)
+        -- Right wall
+        table.insert(borders, BoardOrigin * CFrame.new(bw + PS * 0.5, 0, zOff) * FLAT_ROT)
+    end
+    -- Bottom / player-near row
+    for i = 0, 2 do
+        local xOff = (i + 0.5) * PS
+        table.insert(borders, BoardOrigin * CFrame.new(xOff, 0, bd + PS * 0.5) * FLAT_ROT)
+    end
 
-    -- Flat pallet CFrame: lay the pallet on the ground with -90° X rotation
-    local palletRot = CFrame.Angles(-math.pi / 2, 0, 0)
-
-    -- Build a 3×3 outline of pallets (border only, not filled inside).
-    -- Grid positions in pallet units: 3 columns (0,1,2) × 3 rows (0,1,2).
-    -- Only the border cells: top row, bottom row, left col, right col.
     BorderModels = {}
-    for pr = 0, 2 do      -- pallet row (0=far/spawn, 2=near/player)
-        for pc = 0, 2 do  -- pallet col (0=left, 2=right)
-            local isBorder = (pr == 0 or pr == 2 or pc == 0 or pc == 2)
-            if isBorder then
-                local x  = (pc + 0.5) * PS
-                local z  = (pr + 0.5) * PS
-                -- Offset so the 3×3 pallet grid lines up with the 9×9 block grid
-                local cf = BoardOrigin * CFrame.new(x - PS * 0, 0, z - PS * 0) * palletRot
-                local m  = spawnToyAt("PalletLightBrown", cf, 3)
-                if m then
-                    table.insert(BorderModels, m)
-                else
-                    Notify("Tetris", "Border pallet failed (" .. pc .. "," .. pr .. ")", 2)
-                end
-            end
+    for i, cf in ipairs(borders) do
+        local m = spawnToyAt("PalletLightBrown", cf, 3)
+        if m then
+            anchorModel(m)
+            setModelCFrame(m, cf)
+            claimOwnership(m)   -- own the border so it stays anchored serverside
+            table.insert(BorderModels, m)
+            Notify("Tetris", "Border " .. i .. "/9 OK", 1)
+        else
+            Notify("Tetris", "Border " .. i .. " failed (skipping)", 2)
         end
     end
 
-    -- Restore player position
-    hrp.CFrame = savedHRP
-    hrp.AssemblyLinearVelocity = Vector3.zero
-
     return true
 end
+
+-- ============================================================
+-- [[ 14. DESTROY HELPER ]]
+-- ============================================================
 
 local function destroyModel(model)
     if not model then return end
     pcall(function()
         if Remotes.DestroyToy then
-            -- DestroyToy requires the nil-instance reference, not the workspace proxy.
-            -- Find it by matching name + DebugId.
+            -- Find the nil-instance reference by DebugId for DestroyToy
             local realRef = model
-            local debugId = pcall(function() return model:GetDebugId() end) and model:GetDebugId() or nil
-            if debugId then
+            local ok, dbgId = pcall(function() return model:GetDebugId() end)
+            if ok and dbgId then
                 for _, obj in ipairs(getnilinstances()) do
-                    if obj.Name == model.Name and obj:GetDebugId() == debugId then
-                        realRef = obj
-                        break
-                    end
+                    local match = pcall(function()
+                        return obj.Name == model.Name and obj:GetDebugId() == dbgId
+                    end)
+                    if match then realRef = obj; break end
                 end
             end
             Remotes.DestroyToy:FireServer(realRef)
@@ -464,10 +468,7 @@ local function destroyModel(model)
 end
 
 local function teardownBoard()
-    if Active.model then
-        destroyModel(Active.model)
-        Active.model = nil
-    end
+    if Active.model then destroyModel(Active.model); Active.model = nil end
     for _, m in ipairs(LandedModels) do destroyModel(m) end
     LandedModels = {}
     for _, m in ipairs(BorderModels) do destroyModel(m) end
@@ -476,7 +477,7 @@ local function teardownBoard()
 end
 
 -- ============================================================
--- [[ 13. PIECE SPAWNING ]]
+-- [[ 15. PIECE SPAWNING ]]
 -- ============================================================
 
 local function spawnPiece()
@@ -487,19 +488,16 @@ local function spawnPiece()
     local startCol = math.floor((COLS - (maxDcol + 1)) / 2)
     local startRow = 0
 
-    -- Game over check: any spawn cell already occupied?
+    -- Game over check
     for _, c in ipairs(getPieceCells(startCol, startRow, name)) do
-        if c[2] >= 0 and isCellBlocked(c[1], c[2]) then
-            return false
-        end
+        if c[2] >= 0 and isCellBlocked(c[1], c[2]) then return false end
     end
 
     local spawnCF = gridToWorld(startCol, startRow)
-
-    -- Teleport to board center so range check always passes, then restore
     local toy = spawnToyAt(name, spawnCF, 3)
+
+    -- Fallback to another piece type if this one fails
     if not toy then
-        -- Last-ditch: try a different piece
         for _, fallback in ipairs(PIECE_NAMES) do
             if fallback ~= name then
                 toy = spawnToyAt(fallback, spawnCF, 2)
@@ -513,38 +511,32 @@ local function spawnPiece()
         return false
     end
 
-    task.wait(0.1)
     Active.model = toy
     Active.name  = name
     Active.col   = startCol
     Active.row   = startRow
 
+    -- Anchor + claim + place the piece
+    anchorModel(toy)
     claimOwnership(toy)
-    applyPieceCFrame()
+    setModelCFrame(toy, spawnCF)
     updateStatus()
     return true
 end
 
 -- ============================================================
--- [[ 14. LOCK & LINE CLEAR ]]
+-- [[ 16. LOCK & LINE CLEAR ]]
 -- ============================================================
 
 local function lockPiece()
     if not Active.model then return end
-
-    -- Anchor all parts in the model
-    for _, p in ipairs(Active.model:GetDescendants()) do
-        if p:IsA("BasePart") then p.Anchored = true end
-    end
-
-    -- Write cells into grid
+    anchorModel(Active.model)
     for _, c in ipairs(getPieceCells(Active.col, Active.row, Active.name)) do
         local col, row = c[1], c[2]
         if row >= 0 and row < ROWS and col >= 0 and col < COLS then
             Grid[row][col] = Active.model
         end
     end
-
     table.insert(LandedModels, Active.model)
     Active.model = nil
     Active.name  = ""
@@ -558,24 +550,24 @@ local function rowIsFull(r)
 end
 
 local function compactAbove(clearedRow)
-    -- Shift every row above clearedRow down by 1 (both grid data and world position)
     for r = clearedRow - 1, 0, -1 do
         for c = 0, COLS - 1 do
             if Grid[r][c] then
-                local model      = Grid[r][c]
-                Grid[r + 1][c]  = model
-                Grid[r][c]      = nil
-                -- Move model one row forward (toward player = +LookVector)
-                claimOwnership(model)
-                if model.PrimaryPart then
-                    model:SetPrimaryPartCFrame(
-                        model.PrimaryPart.CFrame * CFrame.new(0, 0, BLOCK_SIZE)
-                    )
-                else
-                    model:MoveTo(
-                        model:GetModelCFrame().Position
-                        + BoardOrigin.LookVector * BLOCK_SIZE
-                    )
+                local model   = Grid[r][c]
+                Grid[r+1][c] = model
+                Grid[r][c]   = nil
+                -- Shift model 1 row toward player (along +LookVector)
+                local part = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+                if part then
+                    claimOwnership(model)
+                    local shift = BoardOrigin.LookVector * BLOCK_SIZE
+                    -- Build a new CFrame shifted by one row, preserving rotation
+                    local newCF = CFrame.new(part.CFrame.Position + shift)
+                                  * CFrame.fromMatrix(Vector3.zero,
+                                      part.CFrame.RightVector,
+                                      part.CFrame.UpVector,
+                                      part.CFrame.LookVector)
+                    setModelCFrame(model, newCF)
                 end
             end
         end
@@ -593,9 +585,7 @@ local function clearLines()
                     done[m] = true
                     destroyModel(m)
                     for i = #LandedModels, 1, -1 do
-                        if LandedModels[i] == m then
-                            table.remove(LandedModels, i); break
-                        end
+                        if LandedModels[i] == m then table.remove(LandedModels, i); break end
                     end
                 end
                 Grid[r][c] = nil
@@ -612,14 +602,13 @@ local function clearLines()
 end
 
 -- ============================================================
--- [[ 15. PIECE MOVEMENT (player controls) ]]
+-- [[ 17. PIECE MOVEMENT ]]
 -- ============================================================
 
 local function movePieceLeft()
     if not Active.model or not S.running then return end
     if not canMoveLeft() then return end
     Active.col = Active.col - 1
-    claimOwnership(Active.model)
     applyPieceCFrame()
     updateStatus()
 end
@@ -628,17 +617,14 @@ local function movePieceRight()
     if not Active.model or not S.running then return end
     if not canMoveRight() then return end
     Active.col = Active.col + 1
-    claimOwnership(Active.model)
     applyPieceCFrame()
     updateStatus()
 end
 
--- Returns true if the piece advanced, false if it needs to lock
 local function advancePiece()
     if not Active.model then return false end
     if canAdvance() then
         Active.row = Active.row + 1
-        claimOwnership(Active.model)
         applyPieceCFrame()
         updateStatus()
         return true
@@ -647,21 +633,17 @@ local function advancePiece()
 end
 
 -- ============================================================
--- [[ 16. FALL LOOP ]]
+-- [[ 18. FALL LOOP ]]
 -- ============================================================
-
-local advancing = false   -- guard against overlapping task.spawns
 
 local function onHeartbeat(dt)
     if not S.running or not Active.model then return end
-
-    -- Lightweight ownership refresh every frame
-    refreshOwnership(Active.model)
+    if advancing then return end
 
     fallTimer = fallTimer + dt
     local speed = Options.FallSpeed and Options.FallSpeed.Value or 1.5
 
-    if fallTimer >= speed and not advancing then
+    if fallTimer >= speed then
         fallTimer = 0
         advancing = true
         task.spawn(function()
@@ -671,13 +653,12 @@ local function onHeartbeat(dt)
                 clearLines()
                 local ok = spawnPiece()
                 if not ok then
-                    -- Game over
                     S.running  = false
                     S.gameOver = true
                     if fallConn then fallConn:Disconnect(); fallConn = nil end
                     updateStatus()
                     if startBtn then startBtn:SetText("▶ START") end
-                    Notify("Tetris", "GAME OVER!  Lines cleared: " .. linesCleared, 7)
+                    Notify("Tetris", "GAME OVER!  Lines: " .. linesCleared, 7)
                 end
             end
             advancing = false
@@ -686,30 +667,19 @@ local function onHeartbeat(dt)
 end
 
 -- ============================================================
--- [[ 17. CAMERA ]]
+-- [[ 19. CAMERA ]]
 -- ============================================================
 
 local function setCameraOverhead()
     origCamType = Workspace.CurrentCamera.CameraType
-    origCamCF   = Workspace.CurrentCamera.CFrame
     if not BoardOrigin then return end
-
-    local center = (BoardOrigin * CFrame.new(
-        COLS * BLOCK_SIZE / 2, 0,
-        ROWS * BLOCK_SIZE / 2
-    )).Position
-
-    -- Above and slightly behind board, looking down at ~45°
-    local camPos = center + Vector3.new(0, 26, 0) - BoardOrigin.LookVector * 14
-    local camCF  = CFrame.lookAt(camPos, center)
-
+    local center = (BoardOrigin * CFrame.new(COLS*BLOCK_SIZE/2, 0, ROWS*BLOCK_SIZE/2)).Position
+    local camPos = center + Vector3.new(0, 30, 0) - BoardOrigin.LookVector * 10
     Workspace.CurrentCamera.CameraType = Enum.CameraType.Scriptable
-    local tw = TweenSvc:Create(
-        Workspace.CurrentCamera,
+    TweenSvc:Create(Workspace.CurrentCamera,
         TweenInfo.new(1.2, Enum.EasingStyle.Sine, Enum.EasingDirection.Out),
-        { CFrame = camCF }
-    )
-    tw:Play()
+        { CFrame = CFrame.lookAt(camPos, center) }
+    ):Play()
 end
 
 local function restoreCamera()
@@ -719,19 +689,14 @@ local function restoreCamera()
 end
 
 -- ============================================================
--- [[ 18. GAME CONTROL ]]
+-- [[ 20. GAME CONTROL ]]
 -- ============================================================
 
 local function startGame()
     if S.running then return end
-    if not Remotes.SpawnToy then
-        Notify("Tetris", "Remotes not ready yet, wait a moment!", 4)
-        return
-    end
-    local hrp = getRoot()
-    if not hrp then Notify("Tetris", "No character found!", 3) return end
+    if not Remotes.SpawnToy then Notify("Tetris", "Remotes not ready!", 3); return end
+    if not getRoot()        then Notify("Tetris", "No character!", 3);       return end
 
-    -- Reset everything
     S.running    = true
     S.gameOver   = false
     linesCleared = 0
@@ -742,22 +707,23 @@ local function startGame()
     LandedModels = {}
     clearGrid()
 
-    -- Build border
-    local ok = initBoard()
-    if not ok then
-        S.running = false
-        Notify("Tetris", "Board setup failed!", 3)
-        return
-    end
-
     updateStatus()
     if startBtn then startBtn:SetText("■ STOP") end
 
-    -- Camera + first piece (async — InvokeServer yields)
     task.spawn(function()
-        setCameraOverhead()
-        task.wait(0.6)
+        -- Build the board (borders) first
+        local ok = initBoard()
+        if not ok then
+            S.running = false
+            if startBtn then startBtn:SetText("▶ START") end
+            Notify("Tetris", "Board setup failed!", 3)
+            return
+        end
 
+        setCameraOverhead()
+        task.wait(0.5)
+
+        -- Spawn the first piece
         local spawned = spawnPiece()
         if not spawned then
             S.running = false
@@ -767,8 +733,9 @@ local function startGame()
             return
         end
 
+        -- Start the fall loop (no per-frame teleporting — only on moves)
         fallConn = RunService.Heartbeat:Connect(onHeartbeat)
-        Notify("Tetris", "Game started!  ◀ LEFT / RIGHT ▶ to steer", 5)
+        Notify("Tetris", "Game started!  ◀ LEFT / RIGHT ▶", 5)
     end)
 end
 
@@ -776,9 +743,8 @@ local function stopGame()
     S.running  = false
     S.gameOver = false
     advancing  = false
-
     if fallConn then fallConn:Disconnect(); fallConn = nil end
-
+    if startBtn then startBtn:SetText("▶ START") end
     task.spawn(function()
         teardownBoard()
         clearGrid()
@@ -789,13 +755,11 @@ local function stopGame()
         updateStatus()
         Notify("Tetris", "Game stopped.", 2)
     end)
-
-    if startBtn then startBtn:SetText("▶ START") end
     updateStatus()
 end
 
 -- ============================================================
--- [[ 19. UI ]]
+-- [[ 21. UI ]]
 -- ============================================================
 
 local Tabs = {
@@ -803,36 +767,31 @@ local Tabs = {
     UISettings = Window:AddTab("UI",   "settings"),
 }
 
-local Left  = Tabs.Game:AddLeftGroupbox("Controls",  "gamepad-2")
-local Right = Tabs.Game:AddRightGroupbox("Status",   "bar-chart-2")
+local Left  = Tabs.Game:AddLeftGroupbox("Controls", "gamepad-2")
+local Right = Tabs.Game:AddRightGroupbox("Status",  "bar-chart-2")
 
--- ---- START / STOP ----
 startBtn = Left:AddButton({
     Text    = "▶ START",
     Tooltip = "Start the Tetris game",
-    Func    = function()
-        if S.running then stopGame() else startGame() end
-    end,
+    Func    = function() if S.running then stopGame() else startGame() end end,
 })
 
 Left:AddDivider()
 
--- ---- MOVEMENT ----
 Left:AddButton({
     Text    = "◀  LEFT",
-    Tooltip = "Move active piece one column left",
+    Tooltip = "Move active piece left",
     Func    = function() task.spawn(movePieceLeft) end,
 })
 
 Left:AddButton({
     Text    = "RIGHT  ▶",
-    Tooltip = "Move active piece one column right",
+    Tooltip = "Move active piece right",
     Func    = function() task.spawn(movePieceRight) end,
 })
 
 Left:AddDivider()
 
--- ---- FALL SPEED ----
 Left:AddSlider("FallSpeed", {
     Text     = "Fall Speed",
     Default  = 1.5,
@@ -840,19 +799,18 @@ Left:AddSlider("FallSpeed", {
     Max      = 3.0,
     Rounding = 1,
     Suffix   = " s",
-    Tooltip  = "Seconds between automatic row advances",
+    Tooltip  = "Seconds between auto row advances",
 })
 
 Left:AddDivider()
 
 Left:AddButton({
     Text    = "Reset / Stop",
-    Tooltip = "Stop the game and clean up all pieces",
+    Tooltip = "Stop game and clean up all spawned toys",
     Risky   = true,
     Func    = function() stopGame() end,
 })
 
--- ---- STATUS ----
 LblState = Right:AddLabel("State:  Stopped ■")
 LblPiece = Right:AddLabel("Piece:  ---")
 LblCol   = Right:AddLabel("Col:    ---")
@@ -861,12 +819,12 @@ LblLines = Right:AddLabel("Lines:  0")
 
 Right:AddDivider()
 Right:AddLabel({
-    Text     = "Row 0 = spawn end (far)\nRow 8 = player end (near)\nPieces fall toward you.",
+    Text     = "Row 0 = spawn (far)\nRow 8 = near player\nPieces fall toward you.",
     DoesWrap = true,
 })
 
 -- ============================================================
--- [[ 20. UI SETTINGS ]]
+-- [[ 22. UI SETTINGS ]]
 -- ============================================================
 
 ThemeManager:SetLibrary(Library)
@@ -880,7 +838,7 @@ SaveManager:BuildConfigSection(Tabs.UISettings)
 SaveManager:LoadAutoloadConfig()
 
 -- ============================================================
--- [[ 21. INIT ]]
+-- [[ 23. INIT ]]
 -- ============================================================
 
 updateStatus()
