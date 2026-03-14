@@ -183,11 +183,15 @@ local startBtn   -- start/stop button handle
 -- BoardOrigin.RightVector = col direction (+col = right from player's view)
 -- BoardOrigin.LookVector  = row direction (+row = toward player)
 -- Row 0 = far/spawn end   Row 8 = near/player end
+-- The -90° X rotation lays the piece model flat on the ground (models stand
+-- upright by default; rotating around X tips them onto the XZ plane).
+local FLAT_ROT = CFrame.Angles(-math.pi / 2, 0, 0)
+
 local function gridToWorld(col, row)
     if not BoardOrigin then return CFrame.new() end
     local x = (col + 0.5) * BLOCK_SIZE
     local z = (row + 0.5) * BLOCK_SIZE
-    return BoardOrigin * CFrame.new(x, 0, z)
+    return BoardOrigin * CFrame.new(x, 0, z) * FLAT_ROT
 end
 
 -- ============================================================
@@ -237,39 +241,25 @@ end
 -- [[ 9. OWNERSHIP ]]
 -- ============================================================
 
--- Full claim: teleport HRP point-blank, grab+own+ungrab, restore HRP
+-- Full claim: grab+own+ungrab. No HRP teleport — pieces are placed near
+-- the player already and we don't want jarring TP every move.
 local function claimOwnership(model)
     if not model then return end
-    local hrp  = getRoot()
-    if not hrp then return end
     local part = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
     if not part then return end
-
-    local saved = hrp.CFrame
-    hrp.CFrame  = part.CFrame * CFrame.new(0, 3, 0)
-    task.wait(0.05)
     pcall(function()
         if Remotes.CreateGrabLine  then Remotes.CreateGrabLine:FireServer(part, part.CFrame)  end
         if Remotes.SetNetworkOwner then Remotes.SetNetworkOwner:FireServer(part, part.CFrame) end
         if Remotes.DestroyGrabLine then Remotes.DestroyGrabLine:FireServer(part)              end
     end)
-    task.wait(0.05)
-    hrp.CFrame = saved
-    hrp.AssemblyLinearVelocity = Vector3.zero
 end
 
--- Lightweight per-tick refresh: just SetNetworkOwner, no grab lines
+-- Lightweight per-tick refresh: SetNetworkOwner only, no grab lines
 local function refreshOwnership(model)
     if not model or not Remotes.SetNetworkOwner then return end
     local part = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
     if not part then return end
-    local hrp = getRoot()
-    if not hrp then return end
-    local saved = hrp.CFrame
-    hrp.CFrame  = part.CFrame * CFrame.new(0, 3, 0)
     pcall(function() Remotes.SetNetworkOwner:FireServer(part, part.CFrame) end)
-    hrp.CFrame = saved
-    hrp.AssemblyLinearVelocity = Vector3.zero
 end
 
 -- ============================================================
@@ -351,11 +341,12 @@ local function spawnToyAt(name, cf, retries)
             end)
         end
 
-        -- Teleport HRP to spawn point so range check passes, fire remote, restore
-        atPosition(cf.Position + Vector3.new(0, 3, 0), function()
+        -- Spawn the toy. The CFrame already encodes flat orientation via the
+        -- rotation baked into gridToWorld (BoardOrigin is on the XZ plane).
+        -- Third arg Vector3.zero = use the CFrame's own rotation (no extra spin).
+        task.spawn(function()
             pcall(function()
-                -- Third arg: rotation as Vector3 degrees — lay piece flat (X rotation)
-                Remotes.SpawnToy:InvokeServer(name, cf, Vector3.new(-90, 0, 0))
+                Remotes.SpawnToy:InvokeServer(name, cf, Vector3.zero)
             end)
         end)
 
@@ -407,29 +398,38 @@ local function initBoard()
     local yaw = math.atan2(fwd.X, fwd.Z)
     BoardOrigin = CFrame.new(pos) * CFrame.Angles(0, yaw, 0)
 
-    local bw = COLS * BLOCK_SIZE   -- 18 studs
-    local bd = ROWS * BLOCK_SIZE   -- 18 studs
-    local ps = 6                   -- pallet width in studs
+    -- Board is 9×9 blocks = 18×18 studs. Each pallet ≈ 6 studs → 3 pallets per side.
+    local PS = 6  -- pallet size in studs
 
-    -- Teleport to board center so ALL border spawns pass the range check
-    local center = boardCenter()
+    -- Teleport to board center once so ALL spawns pass the range check
+    local center   = boardCenter()
     local savedHRP = hrp.CFrame
     hrp.CFrame = CFrame.new(center)
     hrp.AssemblyLinearVelocity = Vector3.zero
     task.wait(0.1)
 
+    -- Flat pallet CFrame: lay the pallet on the ground with -90° X rotation
+    local palletRot = CFrame.Angles(-math.pi / 2, 0, 0)
+
+    -- Build a 3×3 outline of pallets (border only, not filled inside).
+    -- Grid positions in pallet units: 3 columns (0,1,2) × 3 rows (0,1,2).
+    -- Only the border cells: top row, bottom row, left col, right col.
     BorderModels = {}
-    local borders = {
-        BoardOrigin * CFrame.new(-ps * 0.5,      0, bd / 2),    -- left wall
-        BoardOrigin * CFrame.new(bw + ps * 0.5,  0, bd / 2),    -- right wall
-        BoardOrigin * CFrame.new(bw / 2,         0, -ps * 0.5), -- back wall (spawn side)
-    }
-    for i, cf in ipairs(borders) do
-        local m = spawnToyAt("PalletLightBrown", cf, 3)
-        if m then
-            table.insert(BorderModels, m)
-        else
-            Notify("Tetris", "Border " .. i .. " failed to spawn", 2)
+    for pr = 0, 2 do      -- pallet row (0=far/spawn, 2=near/player)
+        for pc = 0, 2 do  -- pallet col (0=left, 2=right)
+            local isBorder = (pr == 0 or pr == 2 or pc == 0 or pc == 2)
+            if isBorder then
+                local x  = (pc + 0.5) * PS
+                local z  = (pr + 0.5) * PS
+                -- Offset so the 3×3 pallet grid lines up with the 9×9 block grid
+                local cf = BoardOrigin * CFrame.new(x - PS * 0, 0, z - PS * 0) * palletRot
+                local m  = spawnToyAt("PalletLightBrown", cf, 3)
+                if m then
+                    table.insert(BorderModels, m)
+                else
+                    Notify("Tetris", "Border pallet failed (" .. pc .. "," .. pr .. ")", 2)
+                end
+            end
         end
     end
 
@@ -497,14 +497,6 @@ local function spawnPiece()
     local spawnCF = gridToWorld(startCol, startRow)
 
     -- Teleport to board center so range check always passes, then restore
-    local hrp     = getRoot()
-    local savedHRP = hrp and hrp.CFrame
-    if hrp then
-        hrp.CFrame = CFrame.new(boardCenter())
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        task.wait(0.08)
-    end
-
     local toy = spawnToyAt(name, spawnCF, 3)
     if not toy then
         -- Last-ditch: try a different piece
@@ -514,12 +506,6 @@ local function spawnPiece()
                 if toy then name = fallback; break end
             end
         end
-    end
-
-    -- Restore player position
-    if hrp and savedHRP then
-        hrp.CFrame = savedHRP
-        hrp.AssemblyLinearVelocity = Vector3.zero
     end
 
     if not toy then
