@@ -308,22 +308,42 @@ end
 -- [[ 12. BOARD SETUP ]]
 -- ============================================================
 
+-- Teleport HRP to a world position for the duration of a callback, then restore.
+-- Used to pass the server range check on every spawn/ownership call.
+local function atPosition(worldPos, fn)
+    local hrp = getRoot()
+    if not hrp then return fn() end
+    local saved = hrp.CFrame
+    hrp.CFrame = CFrame.new(worldPos)
+    task.wait(0.05)
+    local result = { fn() }
+    task.wait(0.05)
+    hrp.CFrame = saved
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    return table.unpack(result)
+end
+
+-- Returns the world-space center of the board (used as TP point during spawns)
+local function boardCenter()
+    if not BoardOrigin then return Vector3.new(0, 0, 0) end
+    return (BoardOrigin * CFrame.new(
+        COLS * BLOCK_SIZE / 2,
+        3,   -- slightly above ground so we land cleanly
+        ROWS * BLOCK_SIZE / 2
+    )).Position
+end
+
 local function spawnToyAt(name, cf, retries)
     if not Remotes.SpawnToy then return nil end
     retries = retries or 3
 
     for attempt = 1, retries do
-        -- Wait for (or create) the toy folder — it only exists after the first ever spawn
+        -- Ensure toy folder exists (created on very first spawn)
         local folder = waitForToyFolder(6)
-        if not folder then
-            Notify("Tetris", "Toy folder missing (attempt " .. attempt .. ")", 2)
-            task.wait(0.5)
-            -- continue to next attempt; folder may appear after InvokeServer below
-        end
 
         local toy = nil
 
-        -- Set up ChildAdded BEFORE invoking, so we never miss the event
+        -- ChildAdded BEFORE invoking — never miss the event
         local conn
         if folder then
             conn = folder.ChildAdded:Connect(function(child)
@@ -331,14 +351,15 @@ local function spawnToyAt(name, cf, retries)
             end)
         end
 
-        -- Invoke in a separate thread (it yields until server responds)
-        task.spawn(function()
+        -- Teleport HRP to spawn point so range check passes, fire remote, restore
+        atPosition(cf.Position + Vector3.new(0, 3, 0), function()
             pcall(function()
-                Remotes.SpawnToy:InvokeServer(name, cf, Vector3.zero)
+                -- Third arg: rotation as Vector3 degrees — lay piece flat (X rotation)
+                Remotes.SpawnToy:InvokeServer(name, cf, Vector3.new(-90, 0, 0))
             end)
         end)
 
-        -- If folder didn't exist yet, wait for it now (first spawn creates it)
+        -- If folder didn't exist before, try to get it now
         if not folder then
             folder = waitForToyFolder(6)
             if folder and not conn then
@@ -348,21 +369,20 @@ local function spawnToyAt(name, cf, retries)
             end
         end
 
-        -- Also scan existing children in case it already arrived
+        -- Scan existing children in case it arrived instantly
         if folder and not toy then
             for _, child in ipairs(folder:GetChildren()) do
                 if child.Name == name then toy = child; break end
             end
         end
 
-        -- Wait up to 6 seconds for the toy to appear
+        -- Wait up to 6 s
         local t = tick()
         repeat task.wait(0.05) until toy or (tick() - t > 6)
         if conn then conn:Disconnect() end
 
         if toy then return toy end
 
-        -- Retry
         Notify("Tetris", "Spawn attempt " .. attempt .. " failed, retrying...", 2)
         task.wait(0.3)
     end
@@ -375,8 +395,8 @@ local function initBoard()
     if not hrp then return false end
 
     -- Place board origin 18 studs ahead of player, on the ground
-    local fwd    = hrp.CFrame.LookVector
-    fwd          = Vector3.new(fwd.X, 0, fwd.Z).Unit
+    local fwd     = hrp.CFrame.LookVector
+    fwd           = Vector3.new(fwd.X, 0, fwd.Z).Unit
     local groundY = hrp.Position.Y - 3   -- approximate ground level
 
     local pos = Vector3.new(
@@ -384,14 +404,19 @@ local function initBoard()
         groundY,
         hrp.Position.Z + fwd.Z * 18
     )
-    -- Orient so +X = player's right, +Z = toward player (pieces fall this way)
     local yaw = math.atan2(fwd.X, fwd.Z)
     BoardOrigin = CFrame.new(pos) * CFrame.Angles(0, yaw, 0)
 
-    -- Spawn 3 border pallets (visual only — grid handles actual collisions)
-    local bw = COLS * BLOCK_SIZE   -- 18 studs board width
-    local bd = ROWS * BLOCK_SIZE   -- 18 studs board depth
-    local ps = 6                   -- pallet size in studs
+    local bw = COLS * BLOCK_SIZE   -- 18 studs
+    local bd = ROWS * BLOCK_SIZE   -- 18 studs
+    local ps = 6                   -- pallet width in studs
+
+    -- Teleport to board center so ALL border spawns pass the range check
+    local center = boardCenter()
+    local savedHRP = hrp.CFrame
+    hrp.CFrame = CFrame.new(center)
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    task.wait(0.1)
 
     BorderModels = {}
     local borders = {
@@ -400,7 +425,6 @@ local function initBoard()
         BoardOrigin * CFrame.new(bw / 2,         0, -ps * 0.5), -- back wall (spawn side)
     }
     for i, cf in ipairs(borders) do
-        -- spawnToyAt handles waitForToyFolder internally — safe even on first ever spawn
         local m = spawnToyAt("PalletLightBrown", cf, 3)
         if m then
             table.insert(BorderModels, m)
@@ -408,6 +432,10 @@ local function initBoard()
             Notify("Tetris", "Border " .. i .. " failed to spawn", 2)
         end
     end
+
+    -- Restore player position
+    hrp.CFrame = savedHRP
+    hrp.AssemblyLinearVelocity = Vector3.zero
 
     return true
 end
@@ -467,10 +495,19 @@ local function spawnPiece()
     end
 
     local spawnCF = gridToWorld(startCol, startRow)
-    -- spawnToyAt already retries 3 times internally
+
+    -- Teleport to board center so range check always passes, then restore
+    local hrp     = getRoot()
+    local savedHRP = hrp and hrp.CFrame
+    if hrp then
+        hrp.CFrame = CFrame.new(boardCenter())
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        task.wait(0.08)
+    end
+
     local toy = spawnToyAt(name, spawnCF, 3)
     if not toy then
-        -- Last-ditch: try a different piece in case this one is broken
+        -- Last-ditch: try a different piece
         for _, fallback in ipairs(PIECE_NAMES) do
             if fallback ~= name then
                 toy = spawnToyAt(fallback, spawnCF, 2)
@@ -478,6 +515,13 @@ local function spawnPiece()
             end
         end
     end
+
+    -- Restore player position
+    if hrp and savedHRP then
+        hrp.CFrame = savedHRP
+        hrp.AssemblyLinearVelocity = Vector3.zero
+    end
+
     if not toy then
         Notify("Tetris", "Piece spawn failed after all retries!", 4)
         return false
