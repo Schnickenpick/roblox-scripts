@@ -1,15 +1,14 @@
--- TETRIS MOVEMENT TEST
--- Step 1: Spawn block, save it
--- Step 2: Get block's Body CFrame, TP onto it, grab it, KEEP grab active
--- Step 3: While grabbed — unanchor, move down, reanchor
--- Step 4: Release grab, TP back
--- Repeat step 2-4 for each move
+-- TETRIS BLOCK MOVEMENT TEST
+-- Based on confirmed working pattern from research/VerbalHub.luau:
+--   1. Grab Body immediately on ChildAdded (no HRP TP needed at spawn)
+--   2. Wait for PartOwner value to confirm server granted ownership
+--   3. To move: TP HRP point-blank, re-grab, wait, SetPrimaryPartCFrame, anchor, release, TP back
 
 local LP  = game:GetService("Players").LocalPlayer
 local RS  = game:GetService("ReplicatedStorage")
 
-local repo    = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
-local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local repo         = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
+local Library      = loadstring(game:HttpGet(repo .. "Library.lua"))()
 local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
 local SaveManager  = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
 
@@ -21,21 +20,23 @@ local Window = Library:CreateWindow({
     ToggleKeybind = Enum.KeyCode.RightShift,
 })
 
-local function Notify(t, d) Library:Notify({ Title = t, Description = d or "", Time = 3 }) end
+local function Notify(t, d) Library:Notify({ Title = t, Description = d or "", Time = 4 }) end
 
--- Remotes
-local GrabEvents, SpawnToyRF, DestroyToyRE
+-- ============================================================
+-- REMOTES
+-- ============================================================
+
+local CreateGrabLine, DestroyGrabLine, SpawnToyRF, DestroyToyRE
+
 task.spawn(function()
     local GE = RS:WaitForChild("GrabEvents", 10)
     if GE then
-        GrabEvents = {
-            Create  = GE:WaitForChild("CreateGrabLine"),
-            Destroy = GE:WaitForChild("DestroyGrabLine"),
-        }
+        CreateGrabLine  = GE:WaitForChild("CreateGrabLine")
+        DestroyGrabLine = GE:WaitForChild("DestroyGrabLine")
     end
     local MT = RS:WaitForChild("MenuToys", 10)
     if MT then
-        SpawnToyRF  = MT:WaitForChild("SpawnToyRemoteFunction")
+        SpawnToyRF   = MT:WaitForChild("SpawnToyRemoteFunction")
         DestroyToyRE = MT:WaitForChild("DestroyToy")
     end
 end)
@@ -44,132 +45,171 @@ local function getRoot()
     return LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
 end
 
--- The one saved block
-local savedBlock = nil
+-- The saved block
+local savedBlock = nil  -- the Model
+local savedBody  = nil  -- the Body BasePart inside the model
 
 -- ============================================================
--- STEP 1: Spawn block, save reference
+-- STEP 1: Spawn block, grab immediately on ChildAdded,
+--         wait for PartOwner to confirm ownership
 -- ============================================================
+
 local function spawnBlock()
+    if not SpawnToyRF or not CreateGrabLine then
+        Notify("Error", "remotes not ready yet")
+        return
+    end
     local hrp = getRoot()
-    if not hrp or not SpawnToyRF then Notify("Error", "not ready"); return end
+    if not hrp then Notify("Error", "no character"); return end
 
-    -- Spawn 10 studs in front of player
-    local spawnPos = hrp.CFrame * CFrame.new(0, 0, -10)
+    -- Spawn position: 10 studs in front of player at ground level
+    local spawnCF = hrp.CFrame * CFrame.new(0, 0, -10)
 
-    -- TP to spawn point so server range check passes
-    local savedHRP = hrp.CFrame
-    hrp.CFrame = CFrame.new(spawnPos.Position + Vector3.new(0, 3, 0))
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    task.wait(0.2)
-
-    -- Snapshot all current TetracubeT instances in folder BEFORE spawning
+    -- Get/wait for toy folder
     local folderName = LP.Name .. "SpawnedInToys"
     local folder = workspace:FindFirstChild(folderName)
+                   or workspace:WaitForChild(folderName, 8)
+    if not folder then Notify("Error", "toy folder not found"); return end
+
+    -- Snapshot existing TetracubeT toys so we can find the NEW one
     local before = {}
-    if folder then
-        for _, c in ipairs(folder:GetChildren()) do
-            if c.Name == "TetracubeT" then before[c] = true end
-        end
+    for _, c in ipairs(folder:GetChildren()) do
+        if c.Name == "TetracubeT" then before[c] = true end
     end
 
-    -- Spawn
-    pcall(function()
-        SpawnToyRF:InvokeServer("TetracubeT", spawnPos, Vector3.zero)
+    local toy  = nil
+    local body = nil
+
+    -- Hook ChildAdded BEFORE InvokeServer — no race condition
+    local conn = folder.ChildAdded:Connect(function(child)
+        if child.Name == "TetracubeT" and not before[child] then
+            toy = child
+
+            -- Get Body — wait for it to replicate
+            local b = child:FindFirstChild("Body")
+            if not b then
+                local ok, res = pcall(function() return child:WaitForChild("Body", 3) end)
+                b = ok and res or nil
+            end
+            if not b then return end
+            body = b
+
+            -- Grab Body IMMEDIATELY at its own CFrame
+            -- No HRP TP needed: server just spawned the toy near our player
+            pcall(function()
+                CreateGrabLine:FireServer(body, body.CFrame)
+            end)
+        end
     end)
 
-    -- Folder may now exist for first time
-    if not folder then
-        folder = workspace:FindFirstChild(folderName)
-    end
+    -- Spawn the toy (blocks this thread — we're already in task.spawn context)
+    pcall(function()
+        SpawnToyRF:InvokeServer("TetracubeT", spawnCF, Vector3.zero)
+    end)
+    conn:Disconnect()
 
-    -- Find the NEW TetracubeT that wasn't in before{}
-    local toy = nil
-    local t = tick()
-    repeat
-        task.wait(0.05)
-        if folder then
-            for _, c in ipairs(folder:GetChildren()) do
-                if c.Name == "TetracubeT" and not before[c] then
-                    toy = c
-                    break
+    -- If ChildAdded didn't catch it, scan for the new toy now
+    if not toy then
+        for _, c in ipairs(folder:GetChildren()) do
+            if c.Name == "TetracubeT" and not before[c] then
+                toy = c
+                body = toy:FindFirstChild("Body")
+                if body then
+                    pcall(function()
+                        CreateGrabLine:FireServer(body, body.CFrame)
+                    end)
                 end
+                break
             end
-        else
-            folder = workspace:FindFirstChild(folderName)
         end
-    until toy or tick() - t > 5
-
-    -- Restore HRP
-    hrp.CFrame = savedHRP
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    task.wait(0.05)
-
-    if not toy then Notify("Error", "block didnt spawn"); return end
-
-    -- Wait for Body child to replicate
-    local body = toy:FindFirstChild("Body")
-    if not body then
-        local ok, result = pcall(function() return toy:WaitForChild("Body", 3) end)
-        body = ok and result or nil
     end
 
-    if not body then Notify("Error", "no Body part found"); return end
+    if not toy or not body then
+        Notify("Error", "block or Body not found")
+        return
+    end
+
+    -- Wait for PartOwner value to appear in Body — this is the server confirming ownership
+    local partOwner = body:WaitForChild("PartOwner", 3)
+    if not partOwner then
+        Notify("Warn", "PartOwner not found — may still work")
+    elseif partOwner.Value ~= LP.Name then
+        Notify("Warn", "PartOwner is '" .. tostring(partOwner.Value) .. "' not us!")
+    else
+        Notify("Step 1 OK", "Owned! PartOwner = " .. partOwner.Value)
+    end
+
+    -- Anchor all parts now that we own it
+    for _, p in ipairs(toy:GetDescendants()) do
+        if p:IsA("BasePart") then p.Anchored = true end
+    end
+
+    -- Release grab (keep network ownership)
+    pcall(function() DestroyGrabLine:FireServer(body) end)
 
     savedBlock = toy
-    Notify("Step 1 OK", "Block saved! Body at " .. tostring(math.floor(body.Position.X)) .. "," .. tostring(math.floor(body.Position.Y)) .. "," .. tostring(math.floor(body.Position.Z)))
+    savedBody  = body
+    Notify("Block saved", "ready to move!")
 end
 
 -- ============================================================
--- STEP 2-4: Grab block at its exact position, move it down, release
+-- STEP 2-4: Re-grab, move, anchor, release
 -- ============================================================
-local function moveBlockDown()
-    if not savedBlock then Notify("Error", "no block spawned yet"); return end
 
+local function moveBlock(offsetCF)
+    if not savedBlock or not savedBody then
+        Notify("Error", "no block saved yet")
+        return
+    end
     local hrp = getRoot()
-    if not hrp or not GrabEvents then Notify("Error", "not ready"); return end
+    if not hrp then Notify("Error", "no character"); return end
 
-    -- Get Body — the actual part we grab
-    local body = savedBlock:FindFirstChild("Body")
-    if not body then Notify("Error", "Body missing"); return end
+    local body = savedBody
 
-    -- STEP 2: TP HRP to exact Body position + 3 studs up
+    -- 1. TP HRP right above Body's current position
     local savedHRP = hrp.CFrame
     hrp.CFrame = CFrame.new(body.Position + Vector3.new(0, 3, 0))
     hrp.AssemblyLinearVelocity = Vector3.zero
-    task.wait(0.2)  -- server sees HRP next to Body
 
-    -- Grab Body at its exact CFrame — keep grab active the whole move
-    GrabEvents.Create:FireServer(body, body.CFrame)
-    task.wait(0.2)  -- server grants ownership
+    -- 2. Wait — server sees HRP next to Body
+    task.wait(0.2)
 
-    -- STEP 3: while grabbed — unanchor, move down 2 studs, reanchor
+    -- 3. Re-grab Body at its exact CFrame to refresh ownership
+    pcall(function()
+        CreateGrabLine:FireServer(body, body.CFrame)
+    end)
+
+    -- 4. Wait — server grants/refreshes ownership
+    task.wait(0.2)
+
+    -- 5. Unanchor
     for _, p in ipairs(savedBlock:GetDescendants()) do
         if p:IsA("BasePart") then p.Anchored = false end
     end
     task.wait(0.05)
 
-    -- Move every part down 2 studs
-    for _, p in ipairs(savedBlock:GetDescendants()) do
-        if p:IsA("BasePart") then
-            p.CFrame = p.CFrame * CFrame.new(0, -2, 0)
-        end
-    end
-    task.wait(0.1)  -- server replicates the move
+    -- 6. Move using SetPrimaryPartCFrame (confirmed working in VerbalHub reference)
+    local newCF = savedBlock:GetPrimaryPartCFrame() * offsetCF
+    savedBlock:SetPrimaryPartCFrame(newCF)
 
+    -- 7. Wait — server replicates the move
+    task.wait(0.2)
+
+    -- 8. Anchor all parts
     for _, p in ipairs(savedBlock:GetDescendants()) do
         if p:IsA("BasePart") then p.Anchored = true end
     end
     task.wait(0.05)
 
-    -- STEP 4: release grab, TP back
-    GrabEvents.Destroy:FireServer(body)
+    -- 9. Release grab (keep net ownership)
+    pcall(function() DestroyGrabLine:FireServer(body) end)
     task.wait(0.05)
 
+    -- 10. TP HRP back
     hrp.CFrame = savedHRP
     hrp.AssemblyLinearVelocity = Vector3.zero
 
-    Notify("Moved!", "block moved down 2 studs")
+    Notify("Moved", "offset: " .. tostring(offsetCF))
 end
 
 -- ============================================================
@@ -180,26 +220,53 @@ local Tab  = Window:AddTab("Test", "play")
 local Left = Tab:AddLeftGroupbox("Controls", "box")
 
 Left:AddButton({
-    Text = "1. Spawn Block",
-    Func = function() task.spawn(spawnBlock) end,
+    Text    = "1. Spawn Block",
+    Tooltip = "Spawns TetracubeT and grabs it immediately",
+    Func    = function() task.spawn(spawnBlock) end,
 })
 
 Left:AddDivider()
 
 Left:AddButton({
     Text    = "2. Move Down",
-    Tooltip = "Grabs body, moves down 2 studs, releases",
-    Func    = function() task.spawn(moveBlockDown) end,
+    Tooltip = "Re-grabs, moves block down 2 studs, releases",
+    Func    = function()
+        task.spawn(function()
+            moveBlock(CFrame.new(0, -2, 0))
+        end)
+    end,
+})
+
+Left:AddButton({
+    Text    = "Move Forward",
+    Tooltip = "Moves block 2 studs forward (Z+)",
+    Func    = function()
+        task.spawn(function()
+            moveBlock(CFrame.new(0, 0, 2))
+        end)
+    end,
+})
+
+Left:AddButton({
+    Text    = "Move Back",
+    Tooltip = "Moves block 2 studs back (Z-)",
+    Func    = function()
+        task.spawn(function()
+            moveBlock(CFrame.new(0, 0, -2))
+        end)
+    end,
 })
 
 Left:AddDivider()
 
 Left:AddButton({
-    Text = "Destroy Block",
-    Func = function()
+    Text  = "Destroy Block",
+    Risky = true,
+    Func  = function()
         if savedBlock and DestroyToyRE then
             pcall(function() DestroyToyRE:FireServer(savedBlock) end)
             savedBlock = nil
+            savedBody  = nil
         end
     end,
 })
@@ -211,4 +278,4 @@ ThemeManager:ApplyToTab(Tab)
 SaveManager:SetLibrary(Library)
 SaveManager:SetFolder("TetrisTest")
 
-Notify("Loaded", "Press 'Spawn Block' then 'Move Down'")
+Notify("Loaded", "Press '1. Spawn Block' first")
