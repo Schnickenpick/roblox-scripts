@@ -59,36 +59,50 @@ local function spawnBlock()
 
     -- TP to spawn point so server range check passes
     local savedHRP = hrp.CFrame
-    hrp.CFrame = spawnPos * CFrame.new(0, 3, 0)
+    hrp.CFrame = CFrame.new(spawnPos.Position + Vector3.new(0, 3, 0))
+    hrp.AssemblyLinearVelocity = Vector3.zero
     task.wait(0.2)
 
-    -- Hook ChildAdded BEFORE invoke so we don't miss it
+    -- Snapshot all current TetracubeT instances in folder BEFORE spawning
     local folderName = LP.Name .. "SpawnedInToys"
     local folder = workspace:FindFirstChild(folderName)
-                   or workspace:WaitForChild(folderName, 8)
-    local toy = nil
-    local conn = folder and folder.ChildAdded:Connect(function(c)
-        if c.Name == "TetracubeT" then toy = c end
-    end)
+    local before = {}
+    if folder then
+        for _, c in ipairs(folder:GetChildren()) do
+            if c.Name == "TetracubeT" then before[c] = true end
+        end
+    end
 
+    -- Spawn
     pcall(function()
         SpawnToyRF:InvokeServer("TetracubeT", spawnPos, Vector3.zero)
     end)
 
-    -- Scan existing in case ChildAdded already fired
-    if folder and not toy then
-        for _, c in ipairs(folder:GetChildren()) do
-            if c.Name == "TetracubeT" then toy = c; break end
-        end
+    -- Folder may now exist for first time
+    if not folder then
+        folder = workspace:FindFirstChild(folderName)
     end
 
-    -- Wait up to 3s for toy to appear
+    -- Find the NEW TetracubeT that wasn't in before{}
+    local toy = nil
     local t = tick()
-    repeat task.wait(0.05) until toy or tick() - t > 3
-    if conn then conn:Disconnect() end
+    repeat
+        task.wait(0.05)
+        if folder then
+            for _, c in ipairs(folder:GetChildren()) do
+                if c.Name == "TetracubeT" and not before[c] then
+                    toy = c
+                    break
+                end
+            end
+        else
+            folder = workspace:FindFirstChild(folderName)
+        end
+    until toy or tick() - t > 5
 
     -- Restore HRP
     hrp.CFrame = savedHRP
+    hrp.AssemblyLinearVelocity = Vector3.zero
     task.wait(0.05)
 
     if not toy then Notify("Error", "block didnt spawn"); return end
@@ -103,7 +117,7 @@ local function spawnBlock()
     if not body then Notify("Error", "no Body part found"); return end
 
     savedBlock = toy
-    Notify("Step 1", "Block spawned! Body at " .. tostring(body.Position))
+    Notify("Step 1 OK", "Block saved! Body at " .. tostring(math.floor(body.Position.X)) .. "," .. tostring(math.floor(body.Position.Y)) .. "," .. tostring(math.floor(body.Position.Z)))
 end
 
 -- ============================================================
