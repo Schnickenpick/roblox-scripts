@@ -77,6 +77,28 @@ local function getToyFolder()
     return Workspace:FindFirstChild(LP.Name .. "SpawnedInToys")
 end
 
+-- Wait up to `timeout` seconds for the toy folder to exist (created on first spawn)
+local function waitForToyFolder(timeout)
+    timeout = timeout or 8
+    local folder = getToyFolder()
+    if folder then return folder end
+    -- The folder is created server-side on first toy spawn, so WaitForChild it
+    local ok, result = pcall(function()
+        return Workspace:WaitForChild(LP.Name .. "SpawnedInToys", timeout)
+    end)
+    return ok and result or nil
+end
+
+-- Find a nil-instance toy by name for DestroyToy (toys live in nil after spawning)
+local function findNilToy(name)
+    for _, obj in ipairs(getnilinstances()) do
+        if obj.Name == name and obj:IsA("Model") then
+            return obj
+        end
+    end
+    return nil
+end
+
 -- ============================================================
 -- [[ 5. BOARD CONSTANTS ]]
 -- ============================================================
@@ -286,21 +308,66 @@ end
 -- [[ 12. BOARD SETUP ]]
 -- ============================================================
 
-local function spawnToyAt(name, cf)
+local function spawnToyAt(name, cf, retries)
     if not Remotes.SpawnToy then return nil end
-    local folder = getToyFolder()
-    if not folder then return nil end
-    local toy = nil
-    local conn = folder.ChildAdded:Connect(function(child)
-        if child.Name == name then toy = child end
-    end)
-    task.spawn(function()
-        Remotes.SpawnToy:InvokeServer(name, cf, Vector3.zero)
-    end)
-    local t = tick()
-    repeat task.wait(0.05) until toy or (tick() - t > 5)
-    conn:Disconnect()
-    return toy
+    retries = retries or 3
+
+    for attempt = 1, retries do
+        -- Wait for (or create) the toy folder — it only exists after the first ever spawn
+        local folder = waitForToyFolder(6)
+        if not folder then
+            Notify("Tetris", "Toy folder missing (attempt " .. attempt .. ")", 2)
+            task.wait(0.5)
+            -- continue to next attempt; folder may appear after InvokeServer below
+        end
+
+        local toy = nil
+
+        -- Set up ChildAdded BEFORE invoking, so we never miss the event
+        local conn
+        if folder then
+            conn = folder.ChildAdded:Connect(function(child)
+                if child.Name == name then toy = child end
+            end)
+        end
+
+        -- Invoke in a separate thread (it yields until server responds)
+        task.spawn(function()
+            pcall(function()
+                Remotes.SpawnToy:InvokeServer(name, cf, Vector3.zero)
+            end)
+        end)
+
+        -- If folder didn't exist yet, wait for it now (first spawn creates it)
+        if not folder then
+            folder = waitForToyFolder(6)
+            if folder and not conn then
+                conn = folder.ChildAdded:Connect(function(child)
+                    if child.Name == name then toy = child end
+                end)
+            end
+        end
+
+        -- Also scan existing children in case it already arrived
+        if folder and not toy then
+            for _, child in ipairs(folder:GetChildren()) do
+                if child.Name == name then toy = child; break end
+            end
+        end
+
+        -- Wait up to 6 seconds for the toy to appear
+        local t = tick()
+        repeat task.wait(0.05) until toy or (tick() - t > 6)
+        if conn then conn:Disconnect() end
+
+        if toy then return toy end
+
+        -- Retry
+        Notify("Tetris", "Spawn attempt " .. attempt .. " failed, retrying...", 2)
+        task.wait(0.3)
+    end
+
+    return nil
 end
 
 local function initBoard()
@@ -328,13 +395,18 @@ local function initBoard()
 
     BorderModels = {}
     local borders = {
-        BoardOrigin * CFrame.new(-ps * 0.5,        0, bd / 2),  -- left wall
-        BoardOrigin * CFrame.new(bw + ps * 0.5,    0, bd / 2),  -- right wall
-        BoardOrigin * CFrame.new(bw / 2,           0, -ps * 0.5), -- back wall (spawn side)
+        BoardOrigin * CFrame.new(-ps * 0.5,      0, bd / 2),    -- left wall
+        BoardOrigin * CFrame.new(bw + ps * 0.5,  0, bd / 2),    -- right wall
+        BoardOrigin * CFrame.new(bw / 2,         0, -ps * 0.5), -- back wall (spawn side)
     }
-    for _, cf in ipairs(borders) do
-        local m = spawnToyAt("PalletLightBrown", cf)
-        if m then table.insert(BorderModels, m) end
+    for i, cf in ipairs(borders) do
+        -- spawnToyAt handles waitForToyFolder internally — safe even on first ever spawn
+        local m = spawnToyAt("PalletLightBrown", cf, 3)
+        if m then
+            table.insert(BorderModels, m)
+        else
+            Notify("Tetris", "Border " .. i .. " failed to spawn", 2)
+        end
     end
 
     return true
@@ -344,7 +416,19 @@ local function destroyModel(model)
     if not model then return end
     pcall(function()
         if Remotes.DestroyToy then
-            Remotes.DestroyToy:FireServer(model)
+            -- DestroyToy requires the nil-instance reference, not the workspace proxy.
+            -- Find it by matching name + DebugId.
+            local realRef = model
+            local debugId = pcall(function() return model:GetDebugId() end) and model:GetDebugId() or nil
+            if debugId then
+                for _, obj in ipairs(getnilinstances()) do
+                    if obj.Name == model.Name and obj:GetDebugId() == debugId then
+                        realRef = obj
+                        break
+                    end
+                end
+            end
+            Remotes.DestroyToy:FireServer(realRef)
         else
             model:Destroy()
         end
@@ -383,9 +467,19 @@ local function spawnPiece()
     end
 
     local spawnCF = gridToWorld(startCol, startRow)
-    local toy     = spawnToyAt(name, spawnCF)
+    -- spawnToyAt already retries 3 times internally
+    local toy = spawnToyAt(name, spawnCF, 3)
     if not toy then
-        Notify("Tetris", "Piece spawn failed!", 3)
+        -- Last-ditch: try a different piece in case this one is broken
+        for _, fallback in ipairs(PIECE_NAMES) do
+            if fallback ~= name then
+                toy = spawnToyAt(fallback, spawnCF, 2)
+                if toy then name = fallback; break end
+            end
+        end
+    end
+    if not toy then
+        Notify("Tetris", "Piece spawn failed after all retries!", 4)
         return false
     end
 
