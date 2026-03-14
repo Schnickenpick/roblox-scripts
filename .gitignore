@@ -32,3 +32,5 @@ docs/walkspeed_logic.txt
 research/Ragarlic.luau
 convert_ui.py
 a
+.claude/settings.local.json
+docs/remotes.txt
