@@ -221,98 +221,86 @@ end
 -- [[ 9. REPLICATION — THE CORE ]]
 -- ============================================================
 
---[[
-  SERVER REPLICATION RULES (Roblox):
-  1. You must have network ownership of a part to have your CFrame changes replicated.
-  2. Network ownership is claimed via CreateGrabLine or SetNetworkOwner (both have range limit).
-  3. To pass the range check: teleport HRP to within ~6 studs of the part first.
-  4. Anchor the part BEFORE setting CFrame — physics engine won't fight you.
-  5. Set each BasePart.CFrame individually (NOT SetPrimaryPartCFrame / MoveTo).
-  6. The ownership + CFrame change must happen in the same task frame (no yielding between).
---]]
-
--- Anchor every BasePart in model. MUST happen before any CFrame write.
+-- Anchor every BasePart in model so physics won't fight CFrame writes.
 local function anchorModel(model)
     if not model then return end
     for _, p in ipairs(model:GetDescendants()) do
-        if p:IsA("BasePart") then
-            p.Anchored = true
-        end
+        if p:IsA("BasePart") then p.Anchored = true end
     end
-    -- Also anchor if the model IS a BasePart (single-part toy)
     if model:IsA("BasePart") then model.Anchored = true end
 end
 
 --[[
-  Place the model so its PrimaryPart (or first BasePart) sits at targetCF.
-  All other parts keep their relative offset from that part.
-  targetCF already contains FLAT_ROT so the toy lies flat.
-  Model MUST be anchored first.
+  moveModel: the ONLY correct way to move a part serverside.
+
+  The sequence that actually replicates:
+    1. TP HRP on top of the part   (passes server range check on grab remote)
+    2. Anchor all parts            (physics won't snap them back)
+    3. FireServer CreateGrabLine   (server gives us network ownership)
+    4. task.wait()                 (give server ONE frame to process ownership)
+    5. Set every BasePart.CFrame   (we own it → server replicates our write)
+    6. FireServer DestroyGrabLine  (release visual grab, keep net ownership)
+    7. TP HRP back
+
+  targetCF is the ABSOLUTE world CFrame for the primary part.
+  Every other part is moved by the same world-space delta.
+  This means we do NOT use relative offsets — just translate all parts
+  by (targetCF.Position - primaryPart.Position). Rotation is set to
+  targetCF's rotation for the primary; other parts keep their current rotation
+  (they are already flat from spawn/previous move).
 --]]
-local function placeModel(model, targetCF)
-    if not model then return end
-
-    local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
-    if not primary then return end
-
-    -- Build inverse of primary's current CFrame so we can compute
-    -- each part's offset from it, then apply at targetCF.
-    local invPrimary = primary.CFrame:Inverse()
-
-    for _, p in ipairs(model:GetDescendants()) do
-        if p:IsA("BasePart") then
-            p.CFrame = targetCF * (invPrimary * p.CFrame)
-        end
-    end
-    if model:IsA("BasePart") then
-        model.CFrame = targetCF
-    end
-end
-
---[[
-  Claim network ownership of 'model', then immediately place it at targetCF.
-  Sequence (must not yield between grab and CFrame set):
-    1. Save HRP CFrame
-    2. TP HRP point-blank above the part (passes range check)
-    3. Fire CreateGrabLine  (claims ownership)
-    4. Fire SetNetworkOwner (belt-and-suspenders)
-    5. Set all BasePart CFrames (we own it now — replicates serverside)
-    6. Fire DestroyGrabLine (release grab, keep ownership until someone else grabs)
-    7. Restore HRP
---]]
-local function claimAndPlace(model, targetCF)
+local function moveModel(model, targetCF)
     if not model then return end
     local hrp = getRoot()
     if not hrp then return end
 
-    local part = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
-    if not part then return end
+    local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+    if not primary then return end
 
-    -- 1. Anchor first — physics can't fight us
+    -- Step 1: TP HRP point-blank onto the part
+    local savedHRP = hrp.CFrame
+    hrp.CFrame = primary.CFrame * CFrame.new(0, 3, 0)
+    hrp.AssemblyLinearVelocity = Vector3.zero
+
+    -- Step 2: Anchor before any CFrame write
     anchorModel(model)
 
-    -- 2. TP HRP point-blank
-    local savedHRP = hrp.CFrame
-    hrp.CFrame = part.CFrame * CFrame.new(0, 3, 0)
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    task.wait(0.05)
-
-    -- 3+4. Claim ownership (no yield between grab and CFrame set!)
+    -- Step 3: Grab → server grants ownership
     pcall(function()
-        if Remotes.CreateGrabLine  then Remotes.CreateGrabLine:FireServer(part, part.CFrame)  end
-        if Remotes.SetNetworkOwner then Remotes.SetNetworkOwner:FireServer(part, part.CFrame) end
+        if Remotes.CreateGrabLine then
+            Remotes.CreateGrabLine:FireServer(primary, primary.CFrame)
+        end
     end)
 
-    -- 5. Place at target — we own it, this replicates serverside
-    placeModel(model, targetCF)
+    -- Step 4: Wait one frame so server processes the ownership grant
+    task.wait()
 
-    -- 6. Release grab (keep net ownership)
+    -- Step 5: Move — translate all parts by the same world delta,
+    -- and set primary to exactly targetCF (so flat rotation is correct).
+    local delta = targetCF.Position - primary.Position
+    local parts = {}
+    for _, p in ipairs(model:GetDescendants()) do
+        if p:IsA("BasePart") then table.insert(parts, p) end
+    end
+    if model:IsA("BasePart") then table.insert(parts, model) end
+
+    -- Primary gets the full targetCF (position + flat rotation)
+    primary.CFrame = targetCF
+    -- All other parts just translate by delta (preserve their current rotation)
+    for _, p in ipairs(parts) do
+        if p ~= primary then
+            p.CFrame = CFrame.new(p.Position + delta) * (p.CFrame - p.CFrame.Position)
+        end
+    end
+
+    -- Step 6: Release grab (keep ownership)
     pcall(function()
-        if Remotes.DestroyGrabLine then Remotes.DestroyGrabLine:FireServer(part) end
+        if Remotes.DestroyGrabLine then
+            Remotes.DestroyGrabLine:FireServer(primary)
+        end
     end)
 
-    -- 7. Restore HRP
-    task.wait(0.03)
+    -- Step 7: Restore HRP
     hrp.CFrame = savedHRP
     hrp.AssemblyLinearVelocity = Vector3.zero
 end
@@ -341,6 +329,7 @@ end
 
   MUST be called from inside a task.spawn context (InvokeServer blocks).
   MUST connect ChildAdded BEFORE calling InvokeServer.
+  After spawn, calls moveModel to force flat CFrame serverside.
 --]]
 local function spawnAndPlace(toyName, targetCF, retries)
     if not Remotes.SpawnToy then return nil end
@@ -396,19 +385,13 @@ local function spawnAndPlace(toyName, targetCF, retries)
         if conn then conn:Disconnect() end
 
         if toy then
-            -- KEY: immediately claim ownership and force the flat CFrame.
-            -- This is what makes the rotation replicate serverside.
-            claimAndPlace(toy, targetCF)
-
-            -- Restore HRP after placement
-            if hrp and savedHRP then
-                hrp.CFrame = savedHRP
-                hrp.AssemblyLinearVelocity = Vector3.zero
-            end
+            -- Immediately move to targetCF with full ownership sequence.
+            -- This forces the flat rotation serverside.
+            moveModel(toy, targetCF)
             return toy
         end
 
-        -- Restore HRP on failed attempt too
+        -- Restore HRP on failed attempt
         if hrp and savedHRP then
             hrp.CFrame = savedHRP
             hrp.AssemblyLinearVelocity = Vector3.zero
@@ -601,13 +584,16 @@ local function compactAbove(clearedRow)
                 -- Re-compute from actual world position + one BLOCK_SIZE shift.
                 local part = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
                 if part and BoardOrigin then
-                    -- Shift position by +1 row (toward player = +LookVector)
-                    local shift = BoardOrigin.LookVector * BLOCK_SIZE
+                    local shift  = BoardOrigin.LookVector * BLOCK_SIZE
                     local newPos = part.CFrame.Position + shift
-                    -- Preserve the FLAT_ROT orientation: use BoardOrigin rotation * FLAT_ROT
-                    local boardRot = BoardOrigin - BoardOrigin.Position  -- rotation only
-                    local newCF = CFrame.new(newPos) * boardRot * FLAT_ROT
-                    claimAndPlace(model, newCF)
+                    -- Keep FLAT_ROT — use board yaw + flat rotation
+                    local newCF  = CFrame.new(newPos) * CFrame.fromMatrix(
+                        Vector3.zero,
+                        BoardOrigin.RightVector,
+                        BoardOrigin.UpVector,
+                        BoardOrigin.LookVector
+                    ) * FLAT_ROT
+                    moveModel(model, newCF)
                 end
             end
         end
@@ -649,7 +635,7 @@ local function movePieceLeft()
     if not Active.model or not S.running then return end
     if not canMoveLeft() then return end
     Active.col = Active.col - 1
-    claimAndPlace(Active.model, gridToWorld(Active.col, Active.row))
+    moveModel(Active.model, gridToWorld(Active.col, Active.row))
     updateStatus()
 end
 
@@ -657,7 +643,7 @@ local function movePieceRight()
     if not Active.model or not S.running then return end
     if not canMoveRight() then return end
     Active.col = Active.col + 1
-    claimAndPlace(Active.model, gridToWorld(Active.col, Active.row))
+    moveModel(Active.model, gridToWorld(Active.col, Active.row))
     updateStatus()
 end
 
@@ -665,7 +651,7 @@ local function advancePiece()
     if not Active.model then return false end
     if canAdvance() then
         Active.row = Active.row + 1
-        claimAndPlace(Active.model, gridToWorld(Active.col, Active.row))
+        moveModel(Active.model, gridToWorld(Active.col, Active.row))
         updateStatus()
         return true
     end
