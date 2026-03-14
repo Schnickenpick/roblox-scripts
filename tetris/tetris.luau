@@ -202,77 +202,87 @@ end
 -- ============================================================
 
 --[[
-  Exact sequence to replicate a CFrame change serverside:
+  Confirmed sequence from research/VerbalHub.luau + Ftap.luau:
 
-  1.  TP HRP onto the block (above it)
-  2.  wait(0.15)  — let the server see our new position before we grab
-  3.  Anchor all parts of the model
-  4.  FireServer CreateGrabLine   — server grants network ownership
-  5.  wait(0.15)  — let server process the ownership grant
-  6.  Set every BasePart.CFrame to the new position
-  7.  wait(0.1)   — let server receive and replicate our CFrame writes
-  8.  FireServer DestroyGrabLine  — release grab (keep net ownership)
-  9.  TP HRP back
-  10. wait(0.1)   — settle
+  The game's grab remote signature: FireServer(part, partCFrame)
+    - part      = the actual BasePart to grab (the toy's Body part)
+    - partCFrame = the CFrame OF THAT PART (not HRP!) — server checks
+                   distance between HRP and this position for range check
+
+  So we MUST:
+    1. TP HRP right next to the part first
+    2. wait — let server see HRP at new position
+    3. FireServer(part, part.CFrame)  ← part's own CFrame as 2nd arg
+    4. wait — let server grant ownership
+    5. Move CFrames
+    6. wait — let server replicate
+    7. DestroyGrabLine
+    8. TP back
 --]]
+
+-- Find the best grabbable part in a model (prefer a child named "Body")
+local function getGrabPart(model)
+    if model:IsA("BasePart") then return model end
+    local body = model:FindFirstChild("Body")
+    if body and body:IsA("BasePart") then return body end
+    return model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+end
+
 local function moveModel(model, targetCF)
     if not model then return end
     local hrp = getRoot()
     if not hrp then return end
 
-    local primary = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
-    if not primary then return end
+    local grabPart = getGrabPart(model)
+    if not grabPart then return end
 
-    -- Compute world-space delta once, before we move anything
-    local delta = targetCF.Position - primary.Position
-
-    -- Collect all parts now (before any teleport scrambles things)
+    -- Collect all BaseParts now for bulk CFrame set
     local parts = {}
     for _, p in ipairs(model:GetDescendants()) do
         if p:IsA("BasePart") then table.insert(parts, p) end
     end
     if model:IsA("BasePart") then table.insert(parts, model) end
 
-    -- 1. TP HRP onto the block
+    -- World-space delta from grabPart to target position
+    local delta = targetCF.Position - grabPart.Position
+
+    -- 1. TP HRP right next to the grab part
     local savedHRP = hrp.CFrame
-    hrp.CFrame = primary.CFrame * CFrame.new(0, 3, 0)
+    hrp.CFrame = grabPart.CFrame * CFrame.new(0, 3, 0)
     hrp.AssemblyLinearVelocity = Vector3.zero
 
-    -- 2. Wait so server sees our new position
-    task.wait(0.15)
+    -- 2. Wait — server must see HRP near the part before grab fires
+    task.wait(0.2)
 
-    -- 3. Anchor so physics won't snap parts back
-    for _, p in ipairs(parts) do p.Anchored = true end
-
-    -- 4. Grab → server grants us network ownership
+    -- 3. Grab the actual part — 2nd arg is the PART's CFrame (range check uses dist HRP <-> this)
     if Remotes.CreateGrabLine then
-        Remotes.CreateGrabLine:FireServer(primary, primary.CFrame)
+        Remotes.CreateGrabLine:FireServer(grabPart, grabPart.CFrame)
     end
 
-    -- 5. Wait for server to process the ownership grant
-    task.wait(0.15)
+    -- 4. Wait — server processes ownership grant
+    task.wait(0.2)
 
-    -- 6. Move every part by the same world delta
-    --    Primary gets the exact targetCF (position + flat rotation)
-    --    Other parts just translate (they keep their current rotation)
-    primary.CFrame = targetCF
+    -- 5. Anchor all parts (physics won't fight us)
+    for _, p in ipairs(parts) do p.Anchored = true end
+
+    -- 6. Move: grabPart gets the exact targetCF, all others translate by same delta
+    grabPart.CFrame = targetCF
     for _, p in ipairs(parts) do
-        if p ~= primary then
-            -- translate only, keep rotation
-            local rot = p.CFrame - p.CFrame.Position  -- rotation component
-            p.CFrame = CFrame.new(p.Position + delta) * rot
+        if p ~= grabPart then
+            p.CFrame = CFrame.new(p.Position + delta)
+                       * CFrame.fromMatrix(Vector3.zero, p.CFrame.RightVector, p.CFrame.UpVector)
         end
     end
 
-    -- 7. Wait so server receives and replicates our CFrame changes
-    task.wait(0.1)
+    -- 7. Wait — server receives and replicates our CFrame writes
+    task.wait(0.15)
 
-    -- 8. Release grab (net ownership stays until someone else grabs it)
+    -- 8. Release grab (net ownership stays with us)
     if Remotes.DestroyGrabLine then
-        Remotes.DestroyGrabLine:FireServer(primary)
+        Remotes.DestroyGrabLine:FireServer(grabPart)
     end
 
-    -- 9. TP HRP back
+    -- 9. TP back
     hrp.CFrame = savedHRP
     hrp.AssemblyLinearVelocity = Vector3.zero
 
@@ -296,25 +306,28 @@ end
 -- [[ SPAWN HELPER ]]
 -- ============================================================
 
+-- Spawns a toy and immediately moves it to targetCF serverside.
+-- Returns the toy model, or nil on failure.
+-- Must be called from inside a task.spawn (InvokeServer blocks).
 local function spawnAndMove(toyName, targetCF, retries)
     if not Remotes.SpawnToy then return nil end
     retries = retries or 3
 
-    local hrp      = getRoot()
-    local savedHRP = hrp and hrp.CFrame
+    local hrp = getRoot()
 
     for attempt = 1, retries do
-        -- TP to spawn point so range check passes
+        -- TP HRP to spawn point so SpawnToy range check passes
         if hrp then
             hrp.CFrame = CFrame.new(targetCF.Position + Vector3.new(0, 3, 0))
             hrp.AssemblyLinearVelocity = Vector3.zero
-            task.wait(0.15)
+            task.wait(0.2)  -- wait for server to see HRP at spawn position
         end
 
+        -- Get (or wait for) the toy folder
         local folder = waitForToyFolder(6)
         local toy    = nil
 
-        -- Connect ChildAdded BEFORE InvokeServer — no race condition
+        -- Hook ChildAdded BEFORE InvokeServer so we don't miss the toy arriving
         local conn
         if folder then
             conn = folder.ChildAdded:Connect(function(child)
@@ -322,51 +335,44 @@ local function spawnAndMove(toyName, targetCF, retries)
             end)
         end
 
-        -- InvokeServer blocks this thread (we're in task.spawn context)
+        -- InvokeServer BLOCKS — correct, we're inside task.spawn
         pcall(function()
             Remotes.SpawnToy:InvokeServer(toyName, targetCF, Vector3.zero)
         end)
 
-        -- Folder may not have existed before first spawn
+        -- Folder may have been created by the first ever spawn
         if not folder then
             folder = waitForToyFolder(4)
-            if folder then
+            if folder and not conn then
                 conn = folder.ChildAdded:Connect(function(child)
                     if child.Name == toyName then toy = child end
                 end)
             end
         end
 
-        -- Scan in case ChildAdded fired before we connected
+        -- Scan existing children in case ChildAdded fired before connect
         if folder and not toy then
             for _, child in ipairs(folder:GetChildren()) do
                 if child.Name == toyName then toy = child; break end
             end
         end
 
+        -- Wait up to 2s for the toy to replicate to client
         local t = tick()
         repeat task.wait(0.05) until toy or (tick() - t > 2)
         if conn then conn:Disconnect() end
 
         if toy then
-            -- Force flat CFrame serverside using full ownership sequence
+            -- Immediately grab + move the toy to targetCF serverside.
+            -- moveModel handles all HRP save/restore internally.
             moveModel(toy, targetCF)
             return toy
         end
 
-        -- Restore on failure
-        if hrp and savedHRP then
-            hrp.CFrame = savedHRP
-            hrp.AssemblyLinearVelocity = Vector3.zero
-        end
         Notify("Tetris", "Spawn attempt " .. attempt .. " failed, retrying...", 2)
         task.wait(0.3)
     end
 
-    if hrp and savedHRP then
-        hrp.CFrame = savedHRP
-        hrp.AssemblyLinearVelocity = Vector3.zero
-    end
     return nil
 end
 
