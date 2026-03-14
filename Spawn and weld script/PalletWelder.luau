@@ -84,7 +84,7 @@ local function getRoot()
     return char and char:FindFirstChild("HumanoidRootPart")
 end
 
--- Find a toy by name and optional debugId in nil instances
+-- Find a toy by name in nil instances
 local function getNilToy(name)
     for _, obj in getnilinstances() do
         if obj.Name == name and obj:IsA("BasePart") then
@@ -93,10 +93,35 @@ local function getNilToy(name)
     end
 end
 
--- Claim network ownership of a part via SetNetworkOwner remote
-local function claimOwnership(part)
-    if Remotes.SetNetworkOwner and part then
+-- Teleport HRP to just above a part so range checks pass, returns original CFrame
+local function tpOnto(part)
+    local root = getRoot()
+    if not root then return nil end
+    local orig = root.CFrame
+    root.CFrame = part.CFrame * CFrame.new(0, 3, 0)
+    task.wait(0.1)
+    return orig
+end
+
+-- Claim ownership: teleport onto part, fire both remotes, teleport back
+local function claimOwnership(part, origCF)
+    if not part then return end
+    -- Fire grab remote while standing right next to it — passes range check
+    if Remotes.CreateGrabLine then
+        Remotes.CreateGrabLine:FireServer(part, part.CFrame)
+        task.wait(0.1)
+        Remotes.DestroyGrabLine:FireServer(part)
+    end
+    -- Belt-and-suspenders: also fire SetNetworkOwner from point-blank range
+    if Remotes.SetNetworkOwner then
         Remotes.SetNetworkOwner:FireServer(part, part.CFrame)
+    end
+    task.wait(0.05)
+    -- Teleport back to original position if provided
+    if origCF then
+        local root = getRoot()
+        if root then root.CFrame = origCF end
+        task.wait(0.05)
     end
 end
 
@@ -225,9 +250,10 @@ local function doWeldPallets()
     Notify("Welder", "Pallet A spawned!", 2)
 
     -- ---- Claim ownership of Pallet A ----
-    -- Fire SetNetworkOwner so the server trusts us as the physics owner
-    claimOwnership(partA)
-    task.wait(0.1)
+    -- Teleport onto it first so the range check on CreateGrabLine/SetNetworkOwner passes
+    StatusLabel:SetText("Claiming Pallet A ownership...")
+    local origCF = tpOnto(partA)
+    claimOwnership(partA, nil) -- stay there for now, teleport back after B
 
     -- ---- Spawn Pallet B above Pallet A ----
     StatusLabel:SetText("Spawning Pallet B...")
@@ -237,6 +263,9 @@ local function doWeldPallets()
     local partB = spawnPallet(cf2)
 
     if not partB then
+        -- Teleport back before returning
+        local root = getRoot()
+        if root and origCF then root.CFrame = origCF end
         Notify("Error", "Pallet B failed to spawn!", 4)
         StatusLabel:SetText("Failed (Pallet B)")
         Pallet2Label:SetText("Pallet B: FAILED")
@@ -247,44 +276,41 @@ local function doWeldPallets()
     Notify("Welder", "Pallet B spawned!", 2)
 
     -- ---- Claim ownership of Pallet B ----
-    claimOwnership(partB)
-    task.wait(0.1)
+    -- Teleport onto B (it's above A, still close)
+    StatusLabel:SetText("Claiming Pallet B ownership...")
+    tpOnto(partB)
+    claimOwnership(partB, nil)
 
     -- ---- Weld them together (serverside) ----
-    -- WeldConstraint must be created on the SERVER to replicate.
-    -- We use a RemoteEvent or… since we have no custom remote for this,
-    -- we use the exploit's firetouchinterest / setpartowner approach:
-    --
-    -- Strategy: use CreateGrabLine on partA (grabs it → we become physics owner),
-    -- then while grabbed, create the WeldConstraint via a server-replicating method.
-    --
-    -- Best serverside weld approach available without a custom remote:
-    -- Anchor both parts first (we own them), create WeldConstraint parented to
-    -- partA — because we own the part the engine accepts the constraint creation
-    -- and it replicates to all clients.
-
-    StatusLabel:SetText("Claiming ownership & welding...")
+    -- We own both parts now (grabbed point-blank). Create WeldConstraint while
+    -- standing right next to partA so the engine replicates it serverside.
+    StatusLabel:SetText("Welding...")
     WeldLabel:SetText("Weld: working...")
 
-    -- Grab partA through the grab remote so server confirms ownership
+    tpOnto(partA)
+
+    -- Re-grab partA to confirm ownership at weld time
     if Remotes.CreateGrabLine then
         Remotes.CreateGrabLine:FireServer(partA, partA.CFrame)
-        task.wait(0.15)
+        task.wait(0.1)
     end
 
-    -- Create WeldConstraint — parented to partA (which we own = server accepts it)
+    -- Create WeldConstraint while we actively own partA
     local weld = Instance.new("WeldConstraint")
     weld.Part0   = partA
     weld.Part1   = partB
     weld.Enabled = true
-    weld.Parent  = partA   -- Parent to owned part → replicates serverside
+    weld.Parent  = partA  -- parented to owned part → server replicates it
 
     task.wait(0.1)
 
-    -- Release grab line (optional, keeps things clean)
     if Remotes.DestroyGrabLine then
         Remotes.DestroyGrabLine:FireServer(partA)
     end
+
+    -- Teleport back to where player was originally
+    local root = getRoot()
+    if root and origCF then root.CFrame = origCF end
 
     -- Done!
     StatusLabel:SetText("Welded! ✓")
