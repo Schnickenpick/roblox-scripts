@@ -220,11 +220,17 @@ end
     8. TP back
 --]]
 
--- Find the best grabbable part in a model (prefer a child named "Body")
-local function getGrabPart(model)
-    if model:IsA("BasePart") then return model end
+-- Wait for the Body part to exist in a toy model (it replicates after spawn).
+-- Confirmed from research: FTAP toys have a child called "Body" that is the grab target.
+local function waitForBody(model, timeout)
+    timeout = timeout or 3
     local body = model:FindFirstChild("Body")
     if body and body:IsA("BasePart") then return body end
+    local ok, result = pcall(function()
+        return model:WaitForChild("Body", timeout)
+    end)
+    if ok and result and result:IsA("BasePart") then return result end
+    -- fallback
     return model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
 end
 
@@ -233,39 +239,44 @@ local function moveModel(model, targetCF)
     local hrp = getRoot()
     if not hrp then return end
 
-    local grabPart = getGrabPart(model)
+    -- Wait for Body to replicate — this is what we actually grab
+    local grabPart = waitForBody(model)
     if not grabPart then return end
 
-    -- Collect all BaseParts now for bulk CFrame set
+    -- Collect all BaseParts for bulk move
     local parts = {}
     for _, p in ipairs(model:GetDescendants()) do
         if p:IsA("BasePart") then table.insert(parts, p) end
     end
     if model:IsA("BasePart") then table.insert(parts, model) end
 
-    -- World-space delta from grabPart to target position
+    -- Delta from grabPart's current position to target
     local delta = targetCF.Position - grabPart.Position
 
-    -- 1. TP HRP right next to the grab part
+    -- 1. TP HRP right above grabPart
     local savedHRP = hrp.CFrame
-    hrp.CFrame = grabPart.CFrame * CFrame.new(0, 3, 0)
+    hrp.CFrame = CFrame.new(grabPart.Position + Vector3.new(0, 3, 0))
     hrp.AssemblyLinearVelocity = Vector3.zero
 
-    -- 2. Wait — server must see HRP near the part before grab fires
+    -- 2. Wait — server sees HRP next to grabPart
     task.wait(0.2)
 
-    -- 3. Grab the actual part — 2nd arg is the PART's CFrame (range check uses dist HRP <-> this)
+    -- 3. Grab grabPart — FireServer(part, part.CFrame)
+    --    Server checks: distance(HRP, part.CFrame.Position) < grabRange
+    --    We are 3 studs above it so this passes
     if Remotes.CreateGrabLine then
         Remotes.CreateGrabLine:FireServer(grabPart, grabPart.CFrame)
     end
 
-    -- 4. Wait — server processes ownership grant
+    -- 4. Wait — server grants network ownership
     task.wait(0.2)
 
-    -- 5. Anchor all parts (physics won't fight us)
+    -- 5. Anchor all parts so physics won't snap them back
     for _, p in ipairs(parts) do p.Anchored = true end
 
-    -- 6. Move: grabPart gets the exact targetCF, all others translate by same delta
+    -- 6. Move every part by the same world delta
+    --    grabPart → exact targetCF (position + flat rotation)
+    --    every other part → translate only (keep current rotation)
     grabPart.CFrame = targetCF
     for _, p in ipairs(parts) do
         if p ~= grabPart then
@@ -274,10 +285,10 @@ local function moveModel(model, targetCF)
         end
     end
 
-    -- 7. Wait — server receives and replicates our CFrame writes
-    task.wait(0.15)
+    -- 7. Wait — server replicates our CFrame writes to all clients
+    task.wait(0.2)
 
-    -- 8. Release grab (net ownership stays with us)
+    -- 8. Release grab (keep net ownership)
     if Remotes.DestroyGrabLine then
         Remotes.DestroyGrabLine:FireServer(grabPart)
     end
