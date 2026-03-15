@@ -5,7 +5,7 @@
 ██╔═══╝ ██╔══██║██║     ██║     ██╔══╝     ██║       ██║███╗██║██╔══╝  ██║     ██║  ██║██╔══╝  ██╔══██╗
 ██║     ██║  ██║███████╗███████╗███████╗   ██║       ╚███╔███╔╝███████╗███████╗██████╔╝███████╗██║  ██║
 ╚═╝     ╚═╝  ╚═╝╚══════╝╚══════╝╚══════╝   ╚═╝        ╚══╝╚══╝ ╚══════╝╚══════╝╚═════╝ ╚══════╝╚═╝  ╚═╝
-  Pallet Welder | Obsidian UI
+  Pallet Welder v2 | CFrame Fake-Weld | Obsidian UI
 --]]
 
 -- ============================================================
@@ -15,9 +15,6 @@
 local LP         = game:GetService("Players").LocalPlayer
 local RS         = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-
-local Workspace  = workspace
-local Camera     = Workspace.CurrentCamera
 
 -- ============================================================
 -- [[ 2. OBSIDIAN UI ]]
@@ -32,8 +29,8 @@ local Options = Library.Options
 local Toggles = Library.Toggles
 
 local Window = Library:CreateWindow({
-    Title            = "Pallet Welder",
-    Footer           = "serverside • obsidian",
+    Title            = "Pallet Welder v2",
+    Footer           = "cframe weld • obsidian",
     NotifySide       = "Right",
     AutoShow         = true,
     Center           = true,
@@ -53,8 +50,8 @@ local Tabs = {
     UISettings = Window:AddTab("UI",         "settings"),
 }
 
-local Left  = Tabs.Main:AddLeftGroupbox("Spawn & Weld",   "box")
-local Right = Tabs.Main:AddRightGroupbox("Status",         "info")
+local Left  = Tabs.Main:AddLeftGroupbox("Spawn & Claim",  "box")
+local Right = Tabs.Main:AddRightGroupbox("Status",        "info")
 
 -- ============================================================
 -- [[ 4. REMOTES ]]
@@ -84,17 +81,12 @@ local function getRoot()
     return char and char:FindFirstChild("HumanoidRootPart")
 end
 
--- Find a toy by name in nil instances
-local function getNilToy(name)
-    for _, obj in getnilinstances() do
-        if obj.Name == name and obj:IsA("BasePart") then
-            return obj
-        end
-    end
+local function getToyFolder()
+    return workspace:FindFirstChild(LP.Name .. "SpawnedInToys")
 end
 
--- Teleport HRP to just above a part so range checks pass, returns original CFrame
-local function tpOnto(part)
+-- Teleport HRP next to a part so range checks pass, returns original CFrame
+local function tpNear(part)
     local root = getRoot()
     if not root then return nil end
     local orig = root.CFrame
@@ -103,105 +95,47 @@ local function tpOnto(part)
     return orig
 end
 
--- Claim ownership: teleport onto part, fire both remotes, teleport back
-local function claimOwnership(part, origCF)
-    if not part then return end
-    -- Fire grab remote while standing right next to it — passes range check
+-- Claim network ownership: tp near, grab+release + SetNetworkOwner, tp back
+local function claimOwnership(part)
+    if not part then return false end
+    local root = getRoot()
+    if not root then return false end
+
+    local origCF = tpNear(part)
+
     if Remotes.CreateGrabLine then
         Remotes.CreateGrabLine:FireServer(part, part.CFrame)
         task.wait(0.1)
-        Remotes.DestroyGrabLine:FireServer(part)
+        if Remotes.DestroyGrabLine then
+            Remotes.DestroyGrabLine:FireServer(part)
+        end
     end
-    -- Belt-and-suspenders: also fire SetNetworkOwner from point-blank range
     if Remotes.SetNetworkOwner then
         Remotes.SetNetworkOwner:FireServer(part, part.CFrame)
     end
     task.wait(0.05)
-    -- Teleport back to original position if provided
+
     if origCF then
-        local root = getRoot()
-        if root then root.CFrame = origCF end
-        task.wait(0.05)
+        local r = getRoot()
+        if r then r.CFrame = origCF end
     end
+    return true
 end
 
--- ============================================================
--- [[ 6. STATUS LABELS ]]
--- ============================================================
-
-local StatusLabel   = Right:AddLabel("Idle")
-local Pallet1Label  = Right:AddLabel("Pallet A: —")
-local Pallet2Label  = Right:AddLabel("Pallet B: —")
-local WeldLabel     = Right:AddLabel("Weld: none")
-
-Right:AddDivider()
-Right:AddLabel({
-    Text     = "1. Spawn both pallets\n2. Click Weld!\nNetOwnership is claimed\nautomatically.",
-    DoesWrap = true,
-})
-
--- ============================================================
--- [[ 7. SETTINGS ]]
--- ============================================================
-
-Left:AddSlider("FrontDist", {
-    Text    = "Front Distance (studs)",
-    Default = 5,
-    Min     = 2,
-    Max     = 20,
-    Rounding = 0,
-    Suffix  = " st",
-})
-
-Left:AddSlider("UpDist", {
-    Text    = "Stack Height (studs)",
-    Default = 4,
-    Min     = 1,
-    Max     = 15,
-    Rounding = 0,
-    Suffix  = " st",
-})
-
-Left:AddDivider()
-
--- ============================================================
--- [[ 8. STATE ]]
--- ============================================================
-
-local spawnedPallets = {}   -- { part, model } entries
-
--- ============================================================
--- [[ 9. SPAWN + WELD LOGIC ]]
--- ============================================================
-
--- Spawns one pallet at the given world CFrame, returns the BasePart
+-- Spawn a pallet at the given CFrame, returns the BasePart reference
 local function spawnPallet(cf)
     if not Remotes.SpawnToy then
-        Notify("Error", "SpawnToy remote not ready yet!", 4)
+        Notify("Error", "SpawnToy remote not ready!", 4)
         return nil
     end
 
-    -- SpawnToyRemoteFunction:InvokeServer(toyName, CFrame, Vector3)
-    -- Vector3 arg is rotation hint; zero is fine for a fresh spawn
-    local result = Remotes.SpawnToy:InvokeServer(
-        "PalletLightBrown",
-        cf,
-        Vector3.new(0, 0, 0)
-    )
+    Remotes.SpawnToy:InvokeServer("PalletLightBrown", cf, Vector3.new(0, 0, 0))
+    task.wait(0.3)
 
-    -- Give the server a moment to replicate the toy into workspace
-    task.wait(0.25)
+    local toyFolder = getToyFolder()
+    if not toyFolder then return nil end
 
-    -- Find the pallet BasePart — it lands in a player-named folder in workspace
-    -- e.g. workspace.[username]SpawnedInToys.PalletLightBrown
-    local toyFolder = Workspace:FindFirstChild(LP.Name .. "SpawnedInToys")
-    if not toyFolder then
-        -- fallback: search all nil instances
-        local nil_part = getNilToy("PalletLightBrown")
-        return nil_part
-    end
-
-    -- Get the most recently added child named PalletLightBrown
+    -- Find the most recently added PalletLightBrown
     local found = nil
     for _, child in ipairs(toyFolder:GetChildren()) do
         if child.Name == "PalletLightBrown" then
@@ -209,152 +143,308 @@ local function spawnPallet(cf)
         end
     end
 
-    -- If it's a model, get its primary part or first BasePart
-    if found then
-        if found:IsA("BasePart") then
-            return found
-        elseif found:IsA("Model") then
-            return found.PrimaryPart or found:FindFirstChildWhichIsA("BasePart")
-        end
-    end
+    if not found then return nil end
 
+    if found:IsA("BasePart") then
+        return found
+    elseif found:IsA("Model") then
+        return found.PrimaryPart or found:FindFirstChildWhichIsA("BasePart")
+    end
     return nil
 end
 
--- Main weld function — spawns both pallets and welds them
-local function doWeldPallets()
-    local root = getRoot()
-    if not root then
-        Notify("Error", "No character!", 3)
-        return
-    end
+-- ============================================================
+-- [[ 6. STATE ]]
+-- ============================================================
 
-    local frontDist = Options.FrontDist.Value
-    local upDist    = Options.UpDist.Value
+local StoredA = nil  -- BasePart reference for Pallet A
+local StoredB = nil  -- BasePart reference for Pallet B
 
-    StatusLabel:SetText("Spawning Pallet A...")
-    Pallet1Label:SetText("Pallet A: spawning...")
-
-    -- CFrame 'frontDist' studs in front of player (no Y offset = ground level of HRP)
-    local cf1 = root.CFrame * CFrame.new(0, 0, -frontDist)
-    local partA = spawnPallet(cf1)
-
-    if not partA then
-        Notify("Error", "Pallet A failed to spawn!", 4)
-        StatusLabel:SetText("Failed (Pallet A)")
-        Pallet1Label:SetText("Pallet A: FAILED")
-        return
-    end
-
-    Pallet1Label:SetText("Pallet A: OK ✓")
-    Notify("Welder", "Pallet A spawned!", 2)
-
-    -- ---- Claim ownership of Pallet A ----
-    -- Teleport onto it first so the range check on CreateGrabLine/SetNetworkOwner passes
-    StatusLabel:SetText("Claiming Pallet A ownership...")
-    local origCF = tpOnto(partA)
-    claimOwnership(partA, nil) -- stay there for now, teleport back after B
-
-    -- ---- Spawn Pallet B above Pallet A ----
-    StatusLabel:SetText("Spawning Pallet B...")
-    Pallet2Label:SetText("Pallet B: spawning...")
-
-    local cf2 = partA.CFrame * CFrame.new(0, upDist, 0)
-    local partB = spawnPallet(cf2)
-
-    if not partB then
-        -- Teleport back before returning
-        local root = getRoot()
-        if root and origCF then root.CFrame = origCF end
-        Notify("Error", "Pallet B failed to spawn!", 4)
-        StatusLabel:SetText("Failed (Pallet B)")
-        Pallet2Label:SetText("Pallet B: FAILED")
-        return
-    end
-
-    Pallet2Label:SetText("Pallet B: OK ✓")
-    Notify("Welder", "Pallet B spawned!", 2)
-
-    -- ---- Claim ownership of Pallet B ----
-    -- Teleport onto B (it's above A, still close)
-    StatusLabel:SetText("Claiming Pallet B ownership...")
-    tpOnto(partB)
-    claimOwnership(partB, nil)
-
-    -- ---- Weld them together (serverside) ----
-    -- We own both parts now (grabbed point-blank). Create WeldConstraint while
-    -- standing right next to partA so the engine replicates it serverside.
-    StatusLabel:SetText("Welding...")
-    WeldLabel:SetText("Weld: working...")
-
-    tpOnto(partA)
-
-    -- Re-grab partA to confirm ownership at weld time
-    if Remotes.CreateGrabLine then
-        Remotes.CreateGrabLine:FireServer(partA, partA.CFrame)
-        task.wait(0.1)
-    end
-
-    -- Create WeldConstraint while we actively own partA
-    local weld = Instance.new("WeldConstraint")
-    weld.Part0   = partA
-    weld.Part1   = partB
-    weld.Enabled = true
-    weld.Parent  = partA  -- parented to owned part → server replicates it
-
-    task.wait(0.1)
-
-    if Remotes.DestroyGrabLine then
-        Remotes.DestroyGrabLine:FireServer(partA)
-    end
-
-    -- Teleport back to where player was originally
-    local root = getRoot()
-    if root and origCF then root.CFrame = origCF end
-
-    -- Done!
-    StatusLabel:SetText("Welded! ✓")
-    WeldLabel:SetText("Weld: ACTIVE ✓")
-    Notify("Welder", "Pallets welded together! Serverside ✓", 5)
-
-    -- Store refs in case we want to clean up later
-    table.insert(spawnedPallets, { a = partA, b = partB, weld = weld })
-end
+local weldActive   = false
+local weldOffset   = nil   -- CFrame offset: PartA-relative position of PartB
+local weldConn     = nil   -- RBXScriptConnection for the Heartbeat loop
 
 -- ============================================================
--- [[ 10. BUTTONS ]]
+-- [[ 7. STATUS LABELS ]]
+-- ============================================================
+
+local StatusLabel  = Right:AddLabel("Idle")
+local PalletALabel = Right:AddLabel("Pallet A: none")
+local PalletBLabel = Right:AddLabel("Pallet B: none")
+local WeldLabel    = Right:AddLabel("Weld: OFF")
+
+Right:AddDivider()
+Right:AddLabel({
+    Text     = "1. Spawn A (stores it)\n2. Spawn B (stores it)\n3. Claim NetOwner on both\n4. Toggle CFrame Weld\n\nA = the part you hold\nB = follows A via CFrame",
+    DoesWrap = true,
+})
+
+-- ============================================================
+-- [[ 8. SETTINGS ]]
+-- ============================================================
+
+Left:AddSlider("SpawnDist", {
+    Text     = "Spawn Distance (studs)",
+    Default  = 5,
+    Min      = 2,
+    Max      = 20,
+    Rounding = 0,
+    Suffix   = " st",
+})
+
+Left:AddSlider("StackHeight", {
+    Text     = "B Height Above A (studs)",
+    Default  = 4,
+    Min      = 1,
+    Max      = 15,
+    Rounding = 0,
+    Suffix   = " st",
+})
+
+Left:AddDivider()
+
+-- ============================================================
+-- [[ 9. SPAWN BUTTONS ]]
 -- ============================================================
 
 Left:AddButton({
-    Text    = "Spawn & Weld Pallets",
-    Tooltip = "Spawns 2 pallets in front of you and welds them together serverside",
+    Text    = "Spawn Pallet A",
+    Tooltip = "Spawns a pallet in front of you and stores it as Part A",
     Func    = function()
-        task.spawn(doWeldPallets)
+        task.spawn(function()
+            local root = getRoot()
+            if not root then Notify("Error", "No character!", 3) return end
+
+            StatusLabel:SetText("Spawning A...")
+            local cf = root.CFrame * CFrame.new(0, 0, -Options.SpawnDist.Value)
+            local part = spawnPallet(cf)
+
+            if not part then
+                Notify("Error", "Pallet A failed to spawn!", 4)
+                StatusLabel:SetText("Failed (A)")
+                PalletALabel:SetText("Pallet A: FAILED")
+                return
+            end
+
+            StoredA = part
+            PalletALabel:SetText("Pallet A: STORED")
+            StatusLabel:SetText("Idle")
+            Notify("Welder", "Pallet A spawned & stored!", 2)
+        end)
+    end,
+})
+
+Left:AddButton({
+    Text    = "Spawn Pallet B",
+    Tooltip = "Spawns a pallet above A (or in front of you) and stores it as Part B",
+    Func    = function()
+        task.spawn(function()
+            local root = getRoot()
+            if not root then Notify("Error", "No character!", 3) return end
+
+            StatusLabel:SetText("Spawning B...")
+
+            local cf
+            if StoredA and StoredA.Parent then
+                -- Spawn above Pallet A
+                cf = StoredA.CFrame * CFrame.new(0, Options.StackHeight.Value, 0)
+            else
+                -- Fallback: in front of player
+                cf = root.CFrame * CFrame.new(0, 0, -Options.SpawnDist.Value)
+            end
+
+            local part = spawnPallet(cf)
+
+            if not part then
+                Notify("Error", "Pallet B failed to spawn!", 4)
+                StatusLabel:SetText("Failed (B)")
+                PalletBLabel:SetText("Pallet B: FAILED")
+                return
+            end
+
+            StoredB = part
+            PalletBLabel:SetText("Pallet B: STORED")
+            StatusLabel:SetText("Idle")
+            Notify("Welder", "Pallet B spawned & stored!", 2)
+        end)
     end,
 })
 
 Left:AddDivider()
 
+-- ============================================================
+-- [[ 10. CLAIM NETOWNERSHIP ]]
+-- ============================================================
+
 Left:AddButton({
-    Text    = "Reset Status",
-    Tooltip = "Clear the status labels",
+    Text    = "Claim NetOwner (Both)",
+    Tooltip = "Teleports to each pallet to grab+release and claim network ownership",
     Func    = function()
+        task.spawn(function()
+            if not StoredA or not StoredA.Parent then
+                Notify("Error", "Pallet A not stored or destroyed!", 3)
+                return
+            end
+            if not StoredB or not StoredB.Parent then
+                Notify("Error", "Pallet B not stored or destroyed!", 3)
+                return
+            end
+
+            StatusLabel:SetText("Claiming A...")
+            local okA = claimOwnership(StoredA)
+            if okA then
+                PalletALabel:SetText("Pallet A: OWNED")
+            end
+
+            StatusLabel:SetText("Claiming B...")
+            local okB = claimOwnership(StoredB)
+            if okB then
+                PalletBLabel:SetText("Pallet B: OWNED")
+            end
+
+            StatusLabel:SetText("Idle")
+            if okA and okB then
+                Notify("Welder", "NetOwnership claimed on both pallets!", 3)
+            else
+                Notify("Warning", "Some claims may have failed", 3)
+            end
+        end)
+    end,
+})
+
+Left:AddDivider()
+
+-- ============================================================
+-- [[ 11. CFRAME FAKE-WELD ]]
+-- ============================================================
+
+-- Disconnect and clean up the weld loop
+local function stopWeld()
+    weldActive = false
+    if weldConn then
+        weldConn:Disconnect()
+        weldConn = nil
+    end
+    weldOffset = nil
+    WeldLabel:SetText("Weld: OFF")
+end
+
+-- Start the CFrame weld loop
+local function startWeld()
+    -- Validation
+    if not StoredA or not StoredA.Parent then
+        Notify("Error", "Pallet A missing! Spawn & claim first.", 3)
+        return
+    end
+    if not StoredB or not StoredB.Parent then
+        Notify("Error", "Pallet B missing! Spawn & claim first.", 3)
+        return
+    end
+    if StoredA.Anchored then
+        Notify("Error", "Pallet A is Anchored — cannot CFrame weld!", 3)
+        return
+    end
+    if StoredB.Anchored then
+        Notify("Error", "Pallet B is Anchored — cannot CFrame weld!", 3)
+        return
+    end
+
+    -- Calculate the offset of B relative to A at this moment
+    -- offset = A.CFrame:Inverse() * B.CFrame
+    -- So later: B.CFrame = A.CFrame * offset
+    weldOffset = StoredA.CFrame:Inverse() * StoredB.CFrame
+    weldActive = true
+
+    weldConn = RunService.Heartbeat:Connect(function()
+        -- Stop if toggle turned off or parts destroyed
+        if not weldActive then
+            stopWeld()
+            return
+        end
+        if not StoredA or not StoredA.Parent or not StoredB or not StoredB.Parent then
+            Notify("Welder", "A pallet was destroyed — weld stopped.", 3)
+            stopWeld()
+            if Toggles.CFrameWeld then
+                Toggles.CFrameWeld:SetValue(false)
+            end
+            return
+        end
+
+        -- Force PartB to follow PartA using the stored offset
+        StoredB.CFrame = StoredA.CFrame * weldOffset
+
+        -- Anti-physics-sleep: tiny velocity so the server doesn't put PartB to sleep
+        -- This ensures our CFrame changes replicate to all clients
+        StoredB.AssemblyLinearVelocity = Vector3.new(0, 0.01, 0)
+        StoredB.AssemblyAngularVelocity = Vector3.zero
+    end)
+
+    WeldLabel:SetText("Weld: ACTIVE")
+    Notify("Welder", "CFrame weld active! Move Pallet A — B follows.", 4)
+end
+
+Left:AddToggle("CFrameWeld", {
+    Text    = "CFrame Weld (A → B)",
+    Default = false,
+    Tooltip = "B follows A every frame via CFrame offset + anti-sleep velocity",
+    Callback = function(value)
+        if value then
+            startWeld()
+        else
+            stopWeld()
+            StatusLabel:SetText("Idle")
+            Notify("Welder", "CFrame weld stopped.", 2)
+        end
+    end,
+})
+
+Left:AddDivider()
+
+-- ============================================================
+-- [[ 12. UTILITY BUTTONS ]]
+-- ============================================================
+
+Left:AddButton({
+    Text    = "Re-snapshot Offset",
+    Tooltip = "Recalculates the A→B offset from current positions (while weld is active)",
+    Func    = function()
+        if not weldActive then
+            Notify("Info", "Weld is not active.", 2)
+            return
+        end
+        if StoredA and StoredA.Parent and StoredB and StoredB.Parent then
+            weldOffset = StoredA.CFrame:Inverse() * StoredB.CFrame
+            Notify("Welder", "Offset re-captured!", 2)
+        end
+    end,
+})
+
+Left:AddButton({
+    Text    = "Reset All",
+    Tooltip = "Stops weld, clears stored pallets, resets status",
+    Func    = function()
+        stopWeld()
+        if Toggles.CFrameWeld then
+            Toggles.CFrameWeld:SetValue(false)
+        end
+        StoredA = nil
+        StoredB = nil
         StatusLabel:SetText("Idle")
-        Pallet1Label:SetText("Pallet A: —")
-        Pallet2Label:SetText("Pallet B: —")
-        WeldLabel:SetText("Weld: none")
-        spawnedPallets = {}
+        PalletALabel:SetText("Pallet A: none")
+        PalletBLabel:SetText("Pallet B: none")
+        WeldLabel:SetText("Weld: OFF")
+        Notify("Welder", "Everything reset.", 2)
     end,
 })
 
 -- ============================================================
--- [[ 11. UI SETTINGS (ThemeManager + SaveManager) ]]
+-- [[ 13. UI SETTINGS (ThemeManager + SaveManager) ]]
 -- ============================================================
 
 ThemeManager:SetLibrary(Library)
 ThemeManager:SetFolder("PalletWelder")
 ThemeManager:ApplyToTab(Tabs.UISettings)
-ThemeManager:ApplyTheme("Catppuccin")   -- cool default theme
+ThemeManager:ApplyTheme("Catppuccin")
 
 SaveManager:SetLibrary(Library)
 SaveManager:SetFolder("PalletWelder")
