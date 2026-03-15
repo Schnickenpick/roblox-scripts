@@ -85,61 +85,52 @@ local function getToyFolder()
     return workspace:FindFirstChild(LP.Name .. "SpawnedInToys")
 end
 
--- Teleport HRP next to a part so range checks pass, returns original CFrame
-local function tpNear(part)
-    local root = getRoot()
-    if not root then return nil end
-    local orig = root.CFrame
-    root.CFrame = part.CFrame * CFrame.new(0, 3, 0)
-    task.wait(0.1)
-    return orig
+-- Disable/restore CanCollide on all character parts
+local function setCharCollision(enabled)
+    local char = LP.Character
+    if not char then return end
+    for _, obj in ipairs(char:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            obj.CanCollide = enabled
+        end
+    end
 end
 
--- Aggressive claim: tp onto part, grab+release TWICE, fire SetNetworkOwner separately, tp back
+-- Claim network ownership: fire SetNetworkOwner, tp near first if out of range (7 studs)
+local CLAIM_RANGE = 7
+
 local function claimOwnership(part)
     if not part then return false end
+    if not Remotes.SetNetworkOwner then
+        Notify("Error", "SetNetworkOwner remote not ready!", 3)
+        return false
+    end
+
     local root = getRoot()
     if not root then return false end
 
-    -- Teleport right on top of the part (point-blank range)
-    local origCF = tpNear(part)
+    local dist = (root.Position - part.Position).Magnitude
+    local origCF = nil
 
-    -- First grab+release pass
-    if Remotes.CreateGrabLine then
-        Remotes.CreateGrabLine:FireServer(part, part.CFrame)
-        task.wait(0.15)
-        if Remotes.DestroyGrabLine then
-            Remotes.DestroyGrabLine:FireServer(part)
-        end
+    if dist > CLAIM_RANGE then
+        -- Teleport near the part with collision off so we don't get stuck
+        origCF = root.CFrame
+        setCharCollision(false)
+        root.CFrame = part.CFrame * CFrame.new(0, 3, 0)
         task.wait(0.1)
     end
 
-    -- Fire SetNetworkOwner separately (belt-and-suspenders)
-    if Remotes.SetNetworkOwner then
-        Remotes.SetNetworkOwner:FireServer(part, part.CFrame)
-        task.wait(0.1)
-    end
+    Remotes.SetNetworkOwner:FireServer(part, part.CFrame)
+    task.wait(0.1)
 
-    -- Second grab+release pass (in case first didn't stick)
-    if Remotes.CreateGrabLine then
-        Remotes.CreateGrabLine:FireServer(part, part.CFrame)
-        task.wait(0.15)
-        if Remotes.DestroyGrabLine then
-            Remotes.DestroyGrabLine:FireServer(part)
-        end
-    end
-
-    -- Fire SetNetworkOwner once more after second grab
-    if Remotes.SetNetworkOwner then
-        Remotes.SetNetworkOwner:FireServer(part, part.CFrame)
-    end
-    task.wait(0.05)
-
-    -- Teleport back
+    -- Teleport back and restore collision
     if origCF then
         local r = getRoot()
         if r then r.CFrame = origCF end
+        task.wait(0.05)
+        setCharCollision(true)
     end
+
     return true
 end
 
@@ -172,7 +163,10 @@ local function spawnPallet(cf, excludeSet)
     if found:IsA("BasePart") then
         return found, found
     elseif found:IsA("Model") then
-        local bp = found.PrimaryPart or found:FindFirstChildWhichIsA("BasePart")
+        -- Prefer the "Main" part for grab/CFrame reliability
+        local bp = found:FindFirstChild("Main")
+            or found.PrimaryPart
+            or found:FindFirstChildWhichIsA("BasePart")
         return bp, found
     end
     return nil, nil
