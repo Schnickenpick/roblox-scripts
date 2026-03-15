@@ -123,7 +123,8 @@ local function claimOwnership(part)
 end
 
 -- Spawn a pallet at the given CFrame, returns the BasePart reference
-local function spawnPallet(cf)
+-- 'exclude' is an optional part/model to skip (so we don't re-find StoredA when spawning B)
+local function spawnPallet(cf, exclude)
     if not Remotes.SpawnToy then
         Notify("Error", "SpawnToy remote not ready!", 4)
         return nil
@@ -135,10 +136,10 @@ local function spawnPallet(cf)
     local toyFolder = getToyFolder()
     if not toyFolder then return nil end
 
-    -- Find the most recently added PalletLightBrown
+    -- Find the most recently added PalletLightBrown, skipping 'exclude'
     local found = nil
     for _, child in ipairs(toyFolder:GetChildren()) do
-        if child.Name == "PalletLightBrown" then
+        if child.Name == "PalletLightBrown" and child ~= exclude then
             found = child
         end
     end
@@ -146,19 +147,21 @@ local function spawnPallet(cf)
     if not found then return nil end
 
     if found:IsA("BasePart") then
-        return found
+        return found, found
     elseif found:IsA("Model") then
-        return found.PrimaryPart or found:FindFirstChildWhichIsA("BasePart")
+        local bp = found.PrimaryPart or found:FindFirstChildWhichIsA("BasePart")
+        return bp, found  -- BasePart for physics, raw entry for exclusion
     end
-    return nil
+    return nil, nil
 end
 
 -- ============================================================
 -- [[ 6. STATE ]]
 -- ============================================================
 
-local StoredA = nil  -- BasePart reference for Pallet A
-local StoredB = nil  -- BasePart reference for Pallet B
+local StoredA    = nil  -- BasePart reference for Pallet A (used for CFrame/grab)
+local StoredARaw = nil  -- raw toy folder child for A (used for exclusion when spawning B)
+local StoredB    = nil  -- BasePart reference for Pallet B
 
 local weldActive   = false
 local weldOffset   = nil   -- CFrame offset: PartA-relative position of PartB
@@ -217,7 +220,7 @@ Left:AddButton({
 
             StatusLabel:SetText("Spawning A...")
             local cf = root.CFrame * CFrame.new(0, 0, -Options.SpawnDist.Value)
-            local part = spawnPallet(cf)
+            local part, raw = spawnPallet(cf)
 
             if not part then
                 Notify("Error", "Pallet A failed to spawn!", 4)
@@ -227,6 +230,7 @@ Left:AddButton({
             end
 
             StoredA = part
+            StoredARaw = raw
             PalletALabel:SetText("Pallet A: STORED")
             StatusLabel:SetText("Idle")
             Notify("Welder", "Pallet A spawned & stored!", 2)
@@ -253,7 +257,7 @@ Left:AddButton({
                 cf = root.CFrame * CFrame.new(0, 0, -Options.SpawnDist.Value)
             end
 
-            local part = spawnPallet(cf)
+            local part = spawnPallet(cf, StoredARaw)
 
             if not part then
                 Notify("Error", "Pallet B failed to spawn!", 4)
@@ -428,6 +432,7 @@ Left:AddButton({
             Toggles.CFrameWeld:SetValue(false)
         end
         StoredA = nil
+        StoredARaw = nil
         StoredB = nil
         StatusLabel:SetText("Idle")
         PalletALabel:SetText("Pallet A: none")
