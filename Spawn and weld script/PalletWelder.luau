@@ -85,30 +85,7 @@ local function getToyFolder()
     return workspace:FindFirstChild(LP.Name .. "SpawnedInToys")
 end
 
--- Zero out all velocity on character parts so we don't fly off after teleporting
-local function killCharVelocity()
-    local char = LP.Character
-    if not char then return end
-    for _, obj in ipairs(char:GetDescendants()) do
-        if obj:IsA("BasePart") then
-            obj.AssemblyLinearVelocity = Vector3.zero
-            obj.AssemblyAngularVelocity = Vector3.zero
-        end
-    end
-end
-
--- Disable/restore CanCollide on all character parts
-local function setCharCollision(enabled)
-    local char = LP.Character
-    if not char then return end
-    for _, obj in ipairs(char:GetDescendants()) do
-        if obj:IsA("BasePart") then
-            obj.CanCollide = enabled
-        end
-    end
-end
-
--- Claim network ownership: tp near if out of range, grab+release + SetNetworkOwner
+-- Claim network ownership: anchor HRP, tp near if needed, grab+release + SetNetworkOwner, tp back
 local CLAIM_RANGE = 7
 
 local function claimOwnership(part)
@@ -119,13 +96,11 @@ local function claimOwnership(part)
     local dist = (root.Position - part.Position).Magnitude
     local origCF = nil
 
-    -- Teleport near if out of range
+    -- If out of range, anchor HRP to freeze physics, teleport, do the claim, teleport back
     if dist > CLAIM_RANGE then
         origCF = root.CFrame
-        setCharCollision(false)
-        killCharVelocity()
+        root.Anchored = true
         root.CFrame = part.CFrame * CFrame.new(0, 3, 0)
-        killCharVelocity()
         task.wait(0.1)
     end
 
@@ -145,16 +120,11 @@ local function claimOwnership(part)
     end
     task.wait(0.05)
 
-    -- Teleport back, kill velocity, restore collision
+    -- Teleport back and unanchor
     if origCF then
-        local r = getRoot()
-        if r then
-            r.CFrame = origCF
-        end
-        killCharVelocity()
+        root.CFrame = origCF
         task.wait(0.05)
-        setCharCollision(true)
-        killCharVelocity()
+        root.Anchored = false
     end
 
     return true
