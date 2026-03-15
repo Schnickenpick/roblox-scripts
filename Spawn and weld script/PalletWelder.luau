@@ -95,26 +95,47 @@ local function tpNear(part)
     return orig
 end
 
--- Claim network ownership: tp near, grab+release + SetNetworkOwner, tp back
+-- Aggressive claim: tp onto part, grab+release TWICE, fire SetNetworkOwner separately, tp back
 local function claimOwnership(part)
     if not part then return false end
     local root = getRoot()
     if not root then return false end
 
+    -- Teleport right on top of the part (point-blank range)
     local origCF = tpNear(part)
 
+    -- First grab+release pass
     if Remotes.CreateGrabLine then
         Remotes.CreateGrabLine:FireServer(part, part.CFrame)
+        task.wait(0.15)
+        if Remotes.DestroyGrabLine then
+            Remotes.DestroyGrabLine:FireServer(part)
+        end
         task.wait(0.1)
+    end
+
+    -- Fire SetNetworkOwner separately (belt-and-suspenders)
+    if Remotes.SetNetworkOwner then
+        Remotes.SetNetworkOwner:FireServer(part, part.CFrame)
+        task.wait(0.1)
+    end
+
+    -- Second grab+release pass (in case first didn't stick)
+    if Remotes.CreateGrabLine then
+        Remotes.CreateGrabLine:FireServer(part, part.CFrame)
+        task.wait(0.15)
         if Remotes.DestroyGrabLine then
             Remotes.DestroyGrabLine:FireServer(part)
         end
     end
+
+    -- Fire SetNetworkOwner once more after second grab
     if Remotes.SetNetworkOwner then
         Remotes.SetNetworkOwner:FireServer(part, part.CFrame)
     end
     task.wait(0.05)
 
+    -- Teleport back
     if origCF then
         local r = getRoot()
         if r then r.CFrame = origCF end
@@ -229,7 +250,7 @@ end
 
 Right:AddDivider()
 Right:AddLabel({
-    Text     = "1. Spawn Root\n2. Spawn Part (spawns + stores)\n3. Position it where you want\n4. Lock Part (saves offset)\n5. Repeat 2-4 for more parts\n6. Claim All NetOwner\n7. Toggle CFrame Weld",
+    Text     = "1. Spawn Root\n2. Spawn Part\n3. Position it where you want\n4. Add to Build (locks offset\n   + claims netowner)\n5. Repeat 2-4\n6. Toggle CFrame Weld",
     DoesWrap = true,
 })
 
@@ -272,9 +293,16 @@ Left:AddButton({
 
             RootPart = part
             RootPartRaw = raw
+            updateLabels()
+            Notify("Welder", "Root spawned! Claiming netowner...", 2)
+
+            -- Auto-claim netownership on root
+            StatusLabel:SetText("Claiming Root...")
+            claimOwnership(RootPart)
+
             StatusLabel:SetText("Idle")
             updateLabels()
-            Notify("Welder", "Root part spawned & stored!", 2)
+            Notify("Welder", "Root part spawned & owned!", 2)
         end)
     end,
 })
@@ -318,33 +346,45 @@ Left:AddButton({
 })
 
 Left:AddButton({
-    Text    = "Lock Part",
-    Tooltip = "Snapshots the pending part's offset relative to Root and adds it to the build",
+    Text    = "Add to Build",
+    Tooltip = "Locks the pending part's offset relative to Root + claims network ownership on it",
     Func    = function()
-        if not RootPart or not RootPart.Parent then
-            Notify("Error", "No Root part! Spawn one first.", 3)
-            return
-        end
-        if not PendingPart or not PendingPart.Parent then
-            Notify("Error", "No pending part to lock! Spawn one first.", 3)
-            return
-        end
+        task.spawn(function()
+            if not RootPart or not RootPart.Parent then
+                Notify("Error", "No Root part! Spawn one first.", 3)
+                return
+            end
+            if not PendingPart or not PendingPart.Parent then
+                Notify("Error", "No pending part! Spawn one first.", 3)
+                return
+            end
 
-        -- Snapshot offset: Root-relative CFrame of this part right now
-        local offset = RootPart.CFrame:Inverse() * PendingPart.CFrame
+            -- Snapshot offset: Root-relative CFrame of this part right now
+            local offset = RootPart.CFrame:Inverse() * PendingPart.CFrame
+            local part = PendingPart
+            local raw  = PendingPartRaw
 
-        table.insert(Children, {
-            part   = PendingPart,
-            raw    = PendingPartRaw,
-            offset = offset,
-        })
+            table.insert(Children, {
+                part   = part,
+                raw    = raw,
+                offset = offset,
+            })
 
-        local idx = #Children
-        PendingPart = nil
-        PendingPartRaw = nil
+            local idx = #Children
+            PendingPart = nil
+            PendingPartRaw = nil
 
-        updateLabels()
-        Notify("Welder", "Part #" .. idx .. " locked!", 2)
+            updateLabels()
+            Notify("Welder", "Part #" .. idx .. " locked! Claiming netowner...", 2)
+
+            -- Claim network ownership on the newly added part
+            StatusLabel:SetText("Claiming #" .. idx .. "...")
+            claimOwnership(part)
+
+            StatusLabel:SetText("Idle")
+            updateLabels()
+            Notify("Welder", "Part #" .. idx .. " added & owned!", 2)
+        end)
     end,
 })
 
@@ -356,49 +396,9 @@ Left:AddButton({
             Notify("Info", "No children to remove.", 2)
             return
         end
-        local removed = table.remove(Children)
+        table.remove(Children)
         updateLabels()
-        Notify("Welder", "Removed child #" .. (#Children + 1) .. " from build (pallet still exists in world).", 3)
-    end,
-})
-
-Left:AddDivider()
-
--- ============================================================
--- [[ 11. CLAIM NETOWNERSHIP ]]
--- ============================================================
-
-Left:AddButton({
-    Text    = "Claim All NetOwner",
-    Tooltip = "Teleports to Root + every child to claim network ownership on all parts",
-    Func    = function()
-        task.spawn(function()
-            if not RootPart or not RootPart.Parent then
-                Notify("Error", "No Root part!", 3)
-                return
-            end
-            if #Children == 0 then
-                Notify("Error", "No child parts to claim!", 3)
-                return
-            end
-
-            -- Claim root
-            StatusLabel:SetText("Claiming Root...")
-            claimOwnership(RootPart)
-            RootLabel:SetText("Root: OWNED")
-
-            -- Claim each child
-            for i, child in ipairs(Children) do
-                if child.part and child.part.Parent then
-                    StatusLabel:SetText("Claiming #" .. i .. " / " .. #Children .. "...")
-                    claimOwnership(child.part)
-                end
-            end
-
-            StatusLabel:SetText("Idle")
-            updateLabels()
-            Notify("Welder", "NetOwnership claimed on all " .. (#Children + 1) .. " parts!", 3)
-        end)
+        Notify("Welder", "Removed child #" .. (#Children + 1) .. " from build.", 3)
     end,
 })
 
@@ -499,6 +499,33 @@ Left:AddDivider()
 -- ============================================================
 -- [[ 13. UTILITY ]]
 -- ============================================================
+
+Left:AddButton({
+    Text    = "Reclaim All NetOwner",
+    Tooltip = "Re-claims netownership on Root + all children (use if ownership was lost)",
+    Func    = function()
+        task.spawn(function()
+            if not RootPart or not RootPart.Parent then
+                Notify("Error", "No Root part!", 3)
+                return
+            end
+
+            StatusLabel:SetText("Reclaiming Root...")
+            claimOwnership(RootPart)
+
+            for i, child in ipairs(Children) do
+                if child.part and child.part.Parent then
+                    StatusLabel:SetText("Reclaiming #" .. i .. " / " .. #Children .. "...")
+                    claimOwnership(child.part)
+                end
+            end
+
+            StatusLabel:SetText("Idle")
+            updateLabels()
+            Notify("Welder", "Reclaimed all " .. (#Children + 1) .. " parts!", 3)
+        end)
+    end,
+})
 
 Left:AddButton({
     Text    = "Re-snapshot All Offsets",
