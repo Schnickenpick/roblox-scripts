@@ -85,6 +85,18 @@ local function getToyFolder()
     return workspace:FindFirstChild(LP.Name .. "SpawnedInToys")
 end
 
+-- Zero out all velocity on character parts so we don't fly off after teleporting
+local function killCharVelocity()
+    local char = LP.Character
+    if not char then return end
+    for _, obj in ipairs(char:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            obj.AssemblyLinearVelocity = Vector3.zero
+            obj.AssemblyAngularVelocity = Vector3.zero
+        end
+    end
+end
+
 -- Disable/restore CanCollide on all character parts
 local function setCharCollision(enabled)
     local char = LP.Character
@@ -96,39 +108,53 @@ local function setCharCollision(enabled)
     end
 end
 
--- Claim network ownership: fire SetNetworkOwner, tp near first if out of range (7 studs)
+-- Claim network ownership: tp near if out of range, grab+release + SetNetworkOwner
 local CLAIM_RANGE = 7
 
 local function claimOwnership(part)
     if not part then return false end
-    if not Remotes.SetNetworkOwner then
-        Notify("Error", "SetNetworkOwner remote not ready!", 3)
-        return false
-    end
-
     local root = getRoot()
     if not root then return false end
 
     local dist = (root.Position - part.Position).Magnitude
     local origCF = nil
 
+    -- Teleport near if out of range
     if dist > CLAIM_RANGE then
-        -- Teleport near the part with collision off so we don't get stuck
         origCF = root.CFrame
         setCharCollision(false)
+        killCharVelocity()
         root.CFrame = part.CFrame * CFrame.new(0, 3, 0)
+        killCharVelocity()
         task.wait(0.1)
     end
 
-    Remotes.SetNetworkOwner:FireServer(part, part.CFrame)
-    task.wait(0.1)
+    -- Grab + release to establish ownership
+    if Remotes.CreateGrabLine then
+        Remotes.CreateGrabLine:FireServer(part, part.CFrame)
+        task.wait(0.15)
+        if Remotes.DestroyGrabLine then
+            Remotes.DestroyGrabLine:FireServer(part)
+        end
+        task.wait(0.05)
+    end
 
-    -- Teleport back and restore collision
+    -- Also fire SetNetworkOwner directly
+    if Remotes.SetNetworkOwner then
+        Remotes.SetNetworkOwner:FireServer(part, part.CFrame)
+    end
+    task.wait(0.05)
+
+    -- Teleport back, kill velocity, restore collision
     if origCF then
         local r = getRoot()
-        if r then r.CFrame = origCF end
+        if r then
+            r.CFrame = origCF
+        end
+        killCharVelocity()
         task.wait(0.05)
         setCharCollision(true)
+        killCharVelocity()
     end
 
     return true
