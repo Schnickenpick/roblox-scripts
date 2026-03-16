@@ -5,7 +5,7 @@
 ██╔═══╝ ██╔══██║██║     ██║     ██╔══╝     ██║       ██║███╗██║██╔══╝  ██║     ██║  ██║██╔══╝  ██╔══██╗
 ██║     ██║  ██║███████╗███████╗███████╗   ██║       ╚███╔███╔╝███████╗███████╗██████╔╝███████╗██║  ██║
 ╚═╝     ╚═╝  ╚═╝╚══════╝╚══════╝╚══════╝   ╚═╝        ╚══╝╚══╝ ╚══════╝╚══════╝╚═════╝ ╚══════╝╚═╝  ╚═╝
-  Pallet Welder v4 | Multi-Part CFrame Weld | Obsidian UI
+  Pallet Welder v5 | Multi-Part CFrame Weld | Obsidian UI
 --]]
 
 -- ============================================================
@@ -13,8 +13,12 @@
 -- ============================================================
 
 local LP         = game:GetService("Players").LocalPlayer
+local Players    = game:GetService("Players")
 local RS         = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local UIS        = game:GetService("UserInputService")
+local Mouse      = LP:GetMouse()
+local Camera     = workspace.CurrentCamera
 
 -- ============================================================
 -- [[ 2. OBSIDIAN UI ]]
@@ -29,7 +33,7 @@ local Options = Library.Options
 local Toggles = Library.Toggles
 
 local Window = Library:CreateWindow({
-    Title            = "Pallet Welder v4",
+    Title            = "Pallet Welder v5",
     Footer           = "multi-part cframe weld • obsidian",
     NotifySide       = "Right",
     AutoShow         = true,
@@ -47,11 +51,15 @@ end
 
 local Tabs = {
     Main       = Window:AddTab("Welder",     "layers"),
+    Steal      = Window:AddTab("Players",    "users"),
     UISettings = Window:AddTab("UI",         "settings"),
 }
 
 local Left  = Tabs.Main:AddLeftGroupbox("Build",    "box")
 local Right = Tabs.Main:AddRightGroupbox("Status",  "info")
+
+local StealLeft  = Tabs.Steal:AddLeftGroupbox("Player Toys",  "box")
+local StealRight = Tabs.Steal:AddRightGroupbox("Highlights",  "info")
 
 -- ============================================================
 -- [[ 4. REMOTES ]]
@@ -85,8 +93,11 @@ local function getToyFolder()
     return workspace:FindFirstChild(LP.Name .. "SpawnedInToys")
 end
 
+local function getPlayerToyFolder(playerName)
+    return workspace:FindFirstChild(playerName .. "SpawnedInToys")
+end
+
 -- Get the best BasePart from a toy entry (Model or BasePart)
--- Prefers "Main" child, then PrimaryPart, then any BasePart
 local function getPartFromToy(toy)
     if toy:IsA("BasePart") then
         return toy
@@ -111,7 +122,6 @@ local function spawnRootPallet(cf)
     local toyFolder = getToyFolder()
     if not toyFolder then return nil, nil end
 
-    -- Find the most recently added PalletLightBrown
     local found = nil
     for _, child in ipairs(toyFolder:GetChildren()) do
         if child.Name == "PalletLightBrown" then
@@ -127,20 +137,117 @@ end
 -- [[ 6. STATE ]]
 -- ============================================================
 
--- Root part (the one you grab and move — everything follows it)
-local RootPart    = nil  -- BasePart (the "Main" or first BasePart)
-local RootPartRaw = nil  -- raw toy folder entry (Model or BasePart)
+-- Root part (the one you grab and move)
+local RootPart    = nil
+local RootPartRaw = nil
 
--- Child parts array. Each entry:
--- { part = BasePart, raw = rawToyEntry, offset = CFrame, name = string }
+-- Child parts: { part = BasePart, raw = rawToyEntry, offset = CFrame, name = string }
 local Children = {}
 
--- Weld loop state
+-- Weld loop
 local weldActive = false
 local weldConn   = nil
 
+-- Highlights: { [rawToyEntry] = Highlight instance }
+local ActiveHighlights = {}
+
+-- Click-to-remove connection
+local clickConn = nil
+
 -- ============================================================
--- [[ 7. STATUS LABELS ]]
+-- [[ 7. HIGHLIGHT SYSTEM ]]
+-- ============================================================
+
+local HIGHLIGHT_COLOR = Color3.fromRGB(255, 170, 0)  -- orange
+local HIGHLIGHT_OUTLINE = Color3.fromRGB(255, 85, 0)
+
+-- Add a highlight to a toy (Model or BasePart)
+local function addHighlight(toy)
+    if ActiveHighlights[toy] then return end -- already highlighted
+
+    local hl = Instance.new("Highlight")
+    hl.Name = "PalletWelderHL"
+    hl.FillColor = HIGHLIGHT_COLOR
+    hl.FillTransparency = 0.7
+    hl.OutlineColor = HIGHLIGHT_OUTLINE
+    hl.OutlineTransparency = 0
+    hl.Adornee = toy
+    hl.Parent = toy
+    ActiveHighlights[toy] = hl
+end
+
+-- Remove highlight from a toy
+local function removeHighlight(toy)
+    local hl = ActiveHighlights[toy]
+    if hl then
+        hl:Destroy()
+        ActiveHighlights[toy] = nil
+    end
+end
+
+-- Remove all highlights
+local function clearAllHighlights()
+    for toy, hl in pairs(ActiveHighlights) do
+        if hl and hl.Parent then
+            hl:Destroy()
+        end
+    end
+    ActiveHighlights = {}
+end
+
+-- Check if a BasePart belongs to a highlighted toy
+local function findHighlightedToyFromPart(part)
+    -- Check if the part itself is a highlighted toy
+    if ActiveHighlights[part] then
+        return part
+    end
+    -- Check if the part's parent model is a highlighted toy
+    local parent = part.Parent
+    if parent and ActiveHighlights[parent] then
+        return parent
+    end
+    -- Check grandparent (in case part is nested deeper)
+    if parent and parent.Parent and ActiveHighlights[parent.Parent] then
+        return parent.Parent
+    end
+    return nil
+end
+
+-- Start listening for clicks to remove highlights
+local function startClickListener()
+    if clickConn then return end -- already listening
+
+    clickConn = Mouse.Button1Down:Connect(function()
+        local target = Mouse.Target
+        if not target then return end
+
+        local toy = findHighlightedToyFromPart(target)
+        if toy then
+            removeHighlight(toy)
+
+            -- Count remaining
+            local remaining = 0
+            for _ in pairs(ActiveHighlights) do
+                remaining += 1
+            end
+
+            if remaining == 0 then
+                Notify("Highlights", "All highlights removed!", 2)
+            end
+        end
+    end)
+end
+
+-- Stop click listener
+local function stopClickListener()
+    if clickConn then
+        clickConn:Disconnect()
+        clickConn = nil
+    end
+end
+
+-- ============================================================
+-- [[ 8. STATUS LABELS ]]
 -- ============================================================
 
 local StatusLabel   = Right:AddLabel("Idle")
@@ -175,7 +282,7 @@ Right:AddLabel({
 })
 
 -- ============================================================
--- [[ 8. SETTINGS ]]
+-- [[ 9. SETTINGS ]]
 -- ============================================================
 
 Left:AddSlider("SpawnDist", {
@@ -190,7 +297,7 @@ Left:AddSlider("SpawnDist", {
 Left:AddDivider()
 
 -- ============================================================
--- [[ 9. SPAWN ROOT ]]
+-- [[ 10. SPAWN ROOT ]]
 -- ============================================================
 
 Left:AddButton({
@@ -223,11 +330,11 @@ Left:AddButton({
 Left:AddDivider()
 
 -- ============================================================
--- [[ 10. ADD ALL FROM FOLDER ]]
+-- [[ 11. ADD FROM FOLDERS ]]
 -- ============================================================
 
 Left:AddButton({
-    Text    = "Add All from Folder",
+    Text    = "Add All from My Folder",
     Tooltip = "Scans your SpawnedInToys folder, adds everything (except Root) as children",
     Func    = function()
         if not RootPart or not RootPart.Parent then
@@ -241,7 +348,6 @@ Left:AddButton({
             return
         end
 
-        -- Build a set of raw entries already in the build (to avoid duplicates)
         local alreadyAdded = {}
         if RootPartRaw then alreadyAdded[RootPartRaw] = true end
         for _, child in ipairs(Children) do
@@ -250,7 +356,6 @@ Left:AddButton({
 
         local added = 0
         for _, toy in ipairs(toyFolder:GetChildren()) do
-            -- Skip root and already-added entries
             if not alreadyAdded[toy] then
                 local bp = getPartFromToy(toy)
                 if bp then
@@ -269,24 +374,10 @@ Left:AddButton({
 
         updateLabels()
         if added > 0 then
-            Notify("Welder", "Added " .. added .. " parts from folder! Total: " .. #Children, 3)
+            Notify("Welder", "Added " .. added .. " parts! Total: " .. #Children, 3)
         else
-            Notify("Info", "No new parts found in folder.", 3)
+            Notify("Info", "No new parts found.", 3)
         end
-    end,
-})
-
-Left:AddButton({
-    Text    = "Remove Last Part",
-    Tooltip = "Removes the last child from the build (does not destroy the toy)",
-    Func    = function()
-        if #Children == 0 then
-            Notify("Info", "No children to remove.", 2)
-            return
-        end
-        table.remove(Children)
-        updateLabels()
-        Notify("Welder", "Removed child #" .. (#Children + 1) .. " from build.", 3)
     end,
 })
 
@@ -303,7 +394,7 @@ Left:AddButton({
 Left:AddDivider()
 
 -- ============================================================
--- [[ 11. CFRAME FAKE-WELD (MULTI-PART) ]]
+-- [[ 12. CFRAME FAKE-WELD (MULTI-PART) ]]
 -- ============================================================
 
 local function stopWeld()
@@ -321,7 +412,7 @@ local function startWeld()
         return
     end
     if #Children == 0 then
-        Notify("Error", "No child parts! Use Add All from Folder first.", 3)
+        Notify("Error", "No child parts! Add some first.", 3)
         return
     end
     if RootPart.Anchored then
@@ -329,7 +420,6 @@ local function startWeld()
         return
     end
 
-    -- Validate children
     local valid = 0
     for _, child in ipairs(Children) do
         if child.part and child.part.Parent and not child.part.Anchored then
@@ -349,7 +439,6 @@ local function startWeld()
             return
         end
 
-        -- If root is gone, stop everything
         if not RootPart or not RootPart.Parent then
             Notify("Welder", "Root destroyed — weld stopped.", 3)
             stopWeld()
@@ -363,10 +452,7 @@ local function startWeld()
 
         for _, child in ipairs(Children) do
             if child.part and child.part.Parent and not child.part.Anchored then
-                -- Force child to follow root using stored offset
                 child.part.CFrame = rootCF * child.offset
-
-                -- Anti-physics-sleep: tiny velocity so server doesn't freeze the part
                 child.part.AssemblyLinearVelocity = Vector3.new(0, 0.01, 0)
                 child.part.AssemblyAngularVelocity = Vector3.zero
             end
@@ -395,7 +481,7 @@ Left:AddToggle("CFrameWeld", {
 Left:AddDivider()
 
 -- ============================================================
--- [[ 12. UTILITY ]]
+-- [[ 13. UTILITY ]]
 -- ============================================================
 
 Left:AddButton({
@@ -419,12 +505,14 @@ Left:AddButton({
 
 Left:AddButton({
     Text    = "Reset All",
-    Tooltip = "Stops weld, clears root + all children, resets everything",
+    Tooltip = "Stops weld, clears root + all children, clears highlights, resets everything",
     Func    = function()
         stopWeld()
         if Toggles.CFrameWeld then
             Toggles.CFrameWeld:SetValue(false)
         end
+        clearAllHighlights()
+        stopClickListener()
         RootPart = nil
         RootPartRaw = nil
         Children = {}
@@ -435,7 +523,203 @@ Left:AddButton({
 })
 
 -- ============================================================
--- [[ 13. UI SETTINGS (ThemeManager + SaveManager) ]]
+-- [[ 14. PLAYER TOYS TAB ]]
+-- ============================================================
+
+-- Player dropdown
+local function getPlayerList()
+    local list = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP then
+            table.insert(list, p.Name)
+        end
+    end
+    if #list == 0 then
+        table.insert(list, "No players")
+    end
+    return list
+end
+
+StealLeft:AddDropdown("TargetPlayer", {
+    Text     = "Select Player",
+    Default  = 1,
+    Values   = getPlayerList(),
+    Multi    = false,
+    Tooltip  = "Pick a player to add their toys to your build",
+})
+
+-- Refresh dropdown on player join/leave
+Players.PlayerAdded:Connect(function()
+    Options.TargetPlayer:SetValues(getPlayerList())
+end)
+Players.PlayerRemoving:Connect(function()
+    task.wait(0.1)
+    Options.TargetPlayer:SetValues(getPlayerList())
+end)
+
+StealLeft:AddButton({
+    Text    = "Refresh Player List",
+    Tooltip = "Manually refresh the player dropdown",
+    Func    = function()
+        Options.TargetPlayer:SetValues(getPlayerList())
+        Notify("Players", "Player list refreshed!", 2)
+    end,
+})
+
+StealLeft:AddDivider()
+
+StealLeft:AddButton({
+    Text    = "Add Player's Toys + Highlight",
+    Tooltip = "Adds all toys from the selected player's folder to the build and highlights them",
+    Func    = function()
+        if not RootPart or not RootPart.Parent then
+            Notify("Error", "No Root part! Spawn one first (Welder tab).", 3)
+            return
+        end
+
+        local playerName = Options.TargetPlayer.Value
+        if not playerName or playerName == "No players" then
+            Notify("Error", "No player selected!", 3)
+            return
+        end
+
+        local folder = getPlayerToyFolder(playerName)
+        if not folder then
+            Notify("Error", "No SpawnedInToys folder for " .. playerName .. "!", 3)
+            return
+        end
+
+        -- Build set of already-added raw entries
+        local alreadyAdded = {}
+        if RootPartRaw then alreadyAdded[RootPartRaw] = true end
+        for _, child in ipairs(Children) do
+            if child.raw then alreadyAdded[child.raw] = true end
+        end
+
+        local added = 0
+        for _, toy in ipairs(folder:GetChildren()) do
+            if not alreadyAdded[toy] then
+                local bp = getPartFromToy(toy)
+                if bp then
+                    local offset = RootPart.CFrame:Inverse() * bp.CFrame
+                    table.insert(Children, {
+                        part   = bp,
+                        raw    = toy,
+                        offset = offset,
+                        name   = toy.Name,
+                    })
+                    alreadyAdded[toy] = true
+                    added += 1
+
+                    -- Add highlight so you can see what needs grabbing
+                    addHighlight(toy)
+                end
+            end
+        end
+
+        -- Start click listener to remove highlights on click
+        if added > 0 then
+            startClickListener()
+        end
+
+        updateLabels()
+        if added > 0 then
+            Notify("Players", "Added " .. added .. " toys from " .. playerName .. "! Click each to remove highlight after grabbing.", 5)
+        else
+            Notify("Info", "No new toys found for " .. playerName .. ".", 3)
+        end
+    end,
+})
+
+StealLeft:AddButton({
+    Text    = "Add Player's Toys (No Highlight)",
+    Tooltip = "Same as above but without highlights",
+    Func    = function()
+        if not RootPart or not RootPart.Parent then
+            Notify("Error", "No Root part! Spawn one first (Welder tab).", 3)
+            return
+        end
+
+        local playerName = Options.TargetPlayer.Value
+        if not playerName or playerName == "No players" then
+            Notify("Error", "No player selected!", 3)
+            return
+        end
+
+        local folder = getPlayerToyFolder(playerName)
+        if not folder then
+            Notify("Error", "No SpawnedInToys folder for " .. playerName .. "!", 3)
+            return
+        end
+
+        local alreadyAdded = {}
+        if RootPartRaw then alreadyAdded[RootPartRaw] = true end
+        for _, child in ipairs(Children) do
+            if child.raw then alreadyAdded[child.raw] = true end
+        end
+
+        local added = 0
+        for _, toy in ipairs(folder:GetChildren()) do
+            if not alreadyAdded[toy] then
+                local bp = getPartFromToy(toy)
+                if bp then
+                    local offset = RootPart.CFrame:Inverse() * bp.CFrame
+                    table.insert(Children, {
+                        part   = bp,
+                        raw    = toy,
+                        offset = offset,
+                        name   = toy.Name,
+                    })
+                    alreadyAdded[toy] = true
+                    added += 1
+                end
+            end
+        end
+
+        updateLabels()
+        if added > 0 then
+            Notify("Players", "Added " .. added .. " toys from " .. playerName .. "!", 3)
+        else
+            Notify("Info", "No new toys found for " .. playerName .. ".", 3)
+        end
+    end,
+})
+
+-- ============================================================
+-- [[ 15. HIGHLIGHT CONTROLS ]]
+-- ============================================================
+
+StealRight:AddLabel("Click a highlighted toy\nin-game to remove its\nhighlight after grabbing it.")
+
+StealRight:AddDivider()
+
+local HighlightCountLabel = StealRight:AddLabel("Highlights: 0")
+
+-- Update highlight count periodically
+task.spawn(function()
+    while task.wait(1) do
+        local count = 0
+        for _ in pairs(ActiveHighlights) do
+            count += 1
+        end
+        HighlightCountLabel:SetText("Highlights: " .. count)
+    end
+end)
+
+StealRight:AddDivider()
+
+StealRight:AddButton({
+    Text    = "Clear All Highlights",
+    Tooltip = "Removes all highlight outlines from toys",
+    Func    = function()
+        clearAllHighlights()
+        stopClickListener()
+        Notify("Highlights", "All highlights cleared.", 2)
+    end,
+})
+
+-- ============================================================
+-- [[ 16. UI SETTINGS (ThemeManager + SaveManager) ]]
 -- ============================================================
 
 ThemeManager:SetLibrary(Library)
