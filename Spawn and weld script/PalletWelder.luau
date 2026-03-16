@@ -52,7 +52,7 @@ end
 local Tabs = {
     Main       = Window:AddTab("Welder",     "layers"),
     Steal      = Window:AddTab("Players",    "users"),
-    IO         = Window:AddTab("Import/Export", "file-text"),
+    IO         = Window:AddTab("Import/Export", "save"),
     UISettings = Window:AddTab("UI",         "settings"),
 }
 
@@ -62,8 +62,8 @@ local Right = Tabs.Main:AddRightGroupbox("Status",  "info")
 local StealLeft  = Tabs.Steal:AddLeftGroupbox("Player Toys",  "box")
 local StealRight = Tabs.Steal:AddRightGroupbox("Highlights",  "info")
 
-local IOLeft  = Tabs.IO:AddLeftGroupbox("Export",  "upload")
-local IORight = Tabs.IO:AddRightGroupbox("Import", "download")
+local IOLeft  = Tabs.IO:AddLeftGroupbox("Export",  "box")
+local IORight = Tabs.IO:AddRightGroupbox("Import", "box")
 
 -- ============================================================
 -- [[ 4. REMOTES ]]
