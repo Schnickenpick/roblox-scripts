@@ -52,6 +52,7 @@ end
 local Tabs = {
     Main       = Window:AddTab("Welder",     "layers"),
     Steal      = Window:AddTab("Players",    "users"),
+    IO         = Window:AddTab("Import/Export", "file-text"),
     UISettings = Window:AddTab("UI",         "settings"),
 }
 
@@ -60,6 +61,9 @@ local Right = Tabs.Main:AddRightGroupbox("Status",  "info")
 
 local StealLeft  = Tabs.Steal:AddLeftGroupbox("Player Toys",  "box")
 local StealRight = Tabs.Steal:AddRightGroupbox("Highlights",  "info")
+
+local IOLeft  = Tabs.IO:AddLeftGroupbox("Export",  "upload")
+local IORight = Tabs.IO:AddRightGroupbox("Import", "download")
 
 -- ============================================================
 -- [[ 4. REMOTES ]]
@@ -126,6 +130,57 @@ local function spawnRootPallet(cf)
     for _, child in ipairs(toyFolder:GetChildren()) do
         if child.Name == "PalletLightBrown" then
             found = child
+        end
+    end
+
+    if not found then return nil, nil end
+    return getPartFromToy(found), found
+end
+
+-- CFrame to array of 12 numbers
+local function cfToArray(cf)
+    return { cf:GetComponents() }
+end
+
+-- Array of 12 numbers to CFrame
+local function arrayToCf(arr)
+    return CFrame.new(arr[1], arr[2], arr[3], arr[4], arr[5], arr[6], arr[7], arr[8], arr[9], arr[10], arr[11], arr[12])
+end
+
+-- Spawn any toy by name at a world CFrame. Anchors HRP, tps 3 studs next to spawn pos, spawns, tps back.
+-- Returns (BasePart, rawToyEntry) or (nil, nil)
+local function spawnToyAt(toyName, worldCF, excludeSet)
+    if not Remotes.SpawnToy then
+        return nil, nil
+    end
+
+    local root = getRoot()
+    if not root then return nil, nil end
+
+    -- Anchor + teleport near the spawn position so range check passes
+    local origCF = root.CFrame
+    root.Anchored = true
+    root.CFrame = worldCF * CFrame.new(3, 0, 0)
+    task.wait(0.1)
+
+    Remotes.SpawnToy:InvokeServer(toyName, worldCF, Vector3.new(0, 0, 0))
+    task.wait(0.3)
+
+    -- Teleport back + unanchor
+    root.CFrame = origCF
+    task.wait(0.05)
+    root.Anchored = false
+
+    -- Find the spawned toy
+    local toyFolder = getToyFolder()
+    if not toyFolder then return nil, nil end
+
+    local found = nil
+    for _, child in ipairs(toyFolder:GetChildren()) do
+        if child.Name == toyName then
+            if not excludeSet or not excludeSet[child] then
+                found = child
+            end
         end
     end
 
@@ -719,7 +774,208 @@ StealRight:AddButton({
 })
 
 -- ============================================================
--- [[ 16. UI SETTINGS (ThemeManager + SaveManager) ]]
+-- [[ 16. IMPORT / EXPORT ]]
+-- ============================================================
+
+local HttpService = game:GetService("HttpService")
+
+-- ---- EXPORT ----
+
+IOLeft:AddInput("BuildName", {
+    Text     = "Build Name",
+    Default  = "",
+    Placeholder = "My Boat (optional)",
+    Tooltip  = "Name for the export. If empty, uses date/time.",
+})
+
+local ExportOutput = IOLeft:AddLabel("Export output will appear here.")
+
+IOLeft:AddButton({
+    Text    = "Export Build",
+    Tooltip = "Exports the current build (Root + Children offsets) to JSON",
+    Func    = function()
+        if not RootPart or not RootPart.Parent then
+            Notify("Error", "No Root part to export!", 3)
+            return
+        end
+        if #Children == 0 then
+            Notify("Error", "No children to export!", 3)
+            return
+        end
+
+        local buildName = Options.BuildName.Value
+        if not buildName or buildName == "" then
+            buildName = "Build_" .. os.date("%Y-%m-%d_%H-%M-%S")
+        end
+
+        local data = {
+            version  = 1,
+            name     = buildName,
+            root     = RootPartRaw and RootPartRaw.Name or "PalletLightBrown",
+            children = {},
+        }
+
+        for _, child in ipairs(Children) do
+            if child.part and child.part.Parent then
+                table.insert(data.children, {
+                    toy    = child.name or "Unknown",
+                    offset = cfToArray(child.offset),
+                })
+            end
+        end
+
+        local json = HttpService:JSONEncode(data)
+        ExportOutput:SetText(json)
+        Notify("Export", "Build exported! " .. #data.children .. " parts. Use Copy button.", 4)
+    end,
+})
+
+IOLeft:AddButton({
+    Text    = "Copy to Clipboard",
+    Tooltip = "Copies the export output to your clipboard",
+    Func    = function()
+        local text = ExportOutput.Text
+        if not text or text == "" or text == "Export output will appear here." then
+            Notify("Error", "Nothing to copy! Export first.", 3)
+            return
+        end
+        if setclipboard then
+            setclipboard(text)
+            Notify("Export", "Copied to clipboard!", 2)
+        else
+            Notify("Error", "setclipboard not available on your executor!", 3)
+        end
+    end,
+})
+
+-- ---- IMPORT ----
+
+IORight:AddInput("ImportJSON", {
+    Text     = "Import JSON",
+    Default  = "",
+    Placeholder = "Paste JSON here...",
+    Tooltip  = "Paste an exported build JSON to import it",
+})
+
+local ImportStatusLabel = IORight:AddLabel("Ready to import.")
+
+IORight:AddButton({
+    Text    = "Import Build",
+    Tooltip = "Spawns Root + all children from the pasted JSON at their correct offsets",
+    Func    = function()
+        task.spawn(function()
+            local json = Options.ImportJSON.Value
+            if not json or json == "" then
+                Notify("Error", "Paste JSON first!", 3)
+                return
+            end
+
+            local ok, data = pcall(function()
+                return HttpService:JSONDecode(json)
+            end)
+            if not ok or type(data) ~= "table" then
+                Notify("Error", "Invalid JSON!", 3)
+                return
+            end
+
+            if not data.root or not data.children or #data.children == 0 then
+                Notify("Error", "JSON missing root or children!", 3)
+                return
+            end
+
+            local root = getRoot()
+            if not root then
+                Notify("Error", "No character!", 3)
+                return
+            end
+
+            if not Remotes.SpawnToy then
+                Notify("Error", "SpawnToy remote not ready!", 3)
+                return
+            end
+
+            -- Stop any active weld
+            stopWeld()
+            if Toggles.CFrameWeld then
+                Toggles.CFrameWeld:SetValue(false)
+            end
+
+            -- Clear existing build
+            Children = {}
+
+            -- The root spawns in front of the player
+            local rootSpawnCF = root.CFrame * CFrame.new(0, 0, -Options.SpawnDist.Value)
+
+            ImportStatusLabel:SetText("Spawning Root...")
+            StatusLabel:SetText("Importing...")
+
+            -- Build exclude set as we go
+            local excludeSet = {}
+
+            -- Spawn root
+            local rootBP, rootRaw = spawnToyAt(data.root, rootSpawnCF, excludeSet)
+            if not rootBP then
+                Notify("Error", "Root (" .. data.root .. ") failed to spawn!", 4)
+                ImportStatusLabel:SetText("Failed (Root)")
+                StatusLabel:SetText("Idle")
+                return
+            end
+
+            RootPart = rootBP
+            RootPartRaw = rootRaw
+            if rootRaw then excludeSet[rootRaw] = true end
+            updateLabels()
+
+            ImportStatusLabel:SetText("Root OK! Spawning children...")
+            Notify("Import", "Root spawned! Now spawning " .. #data.children .. " children...", 3)
+
+            local spawned = 0
+            local failed = 0
+
+            for i, entry in ipairs(data.children) do
+                ImportStatusLabel:SetText("Spawning #" .. i .. " / " .. #data.children .. " (" .. (entry.toy or "?") .. ")")
+
+                -- Calculate world CFrame: root position * stored offset
+                local offset = arrayToCf(entry.offset)
+                local worldCF = rootBP.CFrame * offset
+
+                local bp, raw = spawnToyAt(entry.toy, worldCF, excludeSet)
+                if bp then
+                    if raw then excludeSet[raw] = true end
+
+                    table.insert(Children, {
+                        part   = bp,
+                        raw    = raw,
+                        offset = offset,
+                        name   = entry.toy,
+                    })
+                    spawned += 1
+                else
+                    failed += 1
+                end
+            end
+
+            StatusLabel:SetText("Idle")
+            updateLabels()
+
+            local msg = "Import done! " .. spawned .. " spawned"
+            if failed > 0 then
+                msg = msg .. ", " .. failed .. " failed"
+            end
+            ImportStatusLabel:SetText(msg)
+            Notify("Import", msg .. ". Grab all parts for netowner, then toggle weld!", 5)
+        end)
+    end,
+})
+
+IORight:AddDivider()
+IORight:AddLabel({
+    Text     = "After importing:\n1. Grab each part to get\n   network ownership\n2. Toggle CFrame Weld\n3. Grab Root to move all!",
+    DoesWrap = true,
+})
+
+-- ============================================================
+-- [[ 17. UI SETTINGS (ThemeManager + SaveManager) ]]
 -- ============================================================
 
 ThemeManager:SetLibrary(Library)
