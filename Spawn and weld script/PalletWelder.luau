@@ -162,64 +162,19 @@ local function arrayToCf(arr)
     return CFrame.new(arr[1], arr[2], arr[3], arr[4], arr[5], arr[6], arr[7], arr[8], arr[9], arr[10], arr[11], arr[12])
 end
 
--- Spawn any toy by name at a world CFrame. Anchors HRP, tps 3 studs next to spawn pos, spawns, tps back.
--- Returns (BasePart, rawToyEntry) or (nil, nil)
-local function spawnToyAt(toyName, worldCF, excludeSet)
-    if not Remotes.SpawnToy then
-        return nil, nil
-    end
+-- Spawn a toy near player, find it, return (BasePart, rawToyEntry) or (nil, nil).
+-- Does NOT teleport — just fires the spawn remote from current position.
+local function spawnToyNearby(toyName, excludeSet)
+    if not Remotes.SpawnToy then return nil, nil end
 
-    local root = getRoot()
-    if not root then return nil, nil end
+    local hrp = getRoot()
+    if not hrp then return nil, nil end
 
-    -- Save original state
-    local origCF = root.CFrame
-    local hum = getHum()
+    local spawnCF = hrp.CFrame * CFrame.new(0, 0, -5)
+    Remotes.SpawnToy:InvokeServer(toyName, spawnCF, Vector3.new(0, 0, 0))
+    task.wait(0.4)
 
-    -- Anchor + disable collision + teleport near spawn position so range check passes
-    root.Anchored = true
-    if hum then hum.WalkSpeed = 0 end
-
-    -- Disable collision on all character parts while teleporting
-    local char = LP.Character
-    local collisionParts = {}
-    if char then
-        for _, p in ipairs(char:GetDescendants()) do
-            if p:IsA("BasePart") and p.CanCollide then
-                p.CanCollide = false
-                table.insert(collisionParts, p)
-            end
-        end
-    end
-
-    root.CFrame = worldCF * CFrame.new(3, 0, 0)
-    root.AssemblyLinearVelocity = Vector3.zero
-    root.AssemblyAngularVelocity = Vector3.zero
-    task.wait(0.1)
-
-    Remotes.SpawnToy:InvokeServer(toyName, worldCF, Vector3.new(0, 0, 0))
-    task.wait(0.3)
-
-    -- Teleport back IMMEDIATELY, kill all velocity
-    root.CFrame = origCF
-    root.AssemblyLinearVelocity = Vector3.zero
-    root.AssemblyAngularVelocity = Vector3.zero
-    task.wait(0.05)
-
-    -- Restore state
-    root.Anchored = false
-    root.AssemblyLinearVelocity = Vector3.zero
-    root.AssemblyAngularVelocity = Vector3.zero
-
-    -- Restore collision
-    for _, p in ipairs(collisionParts) do
-        if p and p.Parent then
-            p.CanCollide = true
-        end
-    end
-    if hum then hum.WalkSpeed = 16 end
-
-    -- Find the spawned toy
+    -- Find it in toy folder
     local toyFolder = getToyFolder()
     if not toyFolder then return nil, nil end
 
@@ -236,82 +191,62 @@ local function spawnToyAt(toyName, worldCF, excludeSet)
     return getPartFromToy(found), found
 end
 
--- Claim network ownership of a toy and move its BasePart to a target position.
--- rawToy = the model/entry in the toy folder (for SetNetworkOwner)
--- bp     = the actual BasePart inside (for CreateGrabLine)
--- targetCF = where to move it after claiming
-local function claimAndMove(rawToy, bp, targetCF)
-    if not bp or not bp.Parent then return false end
+-- Spawn + claim + move in one operation.
+-- Spawns toy near player, stays close, claims network ownership, then moves part to targetCF.
+-- Returns (BasePart, rawToyEntry) or (nil, nil).
+local function spawnClaimAndMove(toyName, targetCF, excludeSet)
+    if not Remotes.SpawnToy then return nil, nil end
 
     local hrp = getRoot()
-    if not hrp then return false end
+    if not hrp then return nil, nil end
 
-    local hum = getHum()
-    local char = LP.Character
+    -- Spawn 5 studs in front of player
+    local spawnCF = hrp.CFrame * CFrame.new(0, 0, -5)
+    Remotes.SpawnToy:InvokeServer(toyName, spawnCF, Vector3.new(0, 0, 0))
+    task.wait(0.4)
 
-    -- Read the part's actual current position in the world
-    local partPos = bp.CFrame.Position
+    -- Find it in toy folder
+    local toyFolder = getToyFolder()
+    if not toyFolder then return nil, nil end
 
-    -- Disable collision during TP
-    local collisionParts = {}
-    if char then
-        for _, p in ipairs(char:GetDescendants()) do
-            if p:IsA("BasePart") and p.CanCollide then
-                p.CanCollide = false
-                table.insert(collisionParts, p)
+    local found = nil
+    for _, child in ipairs(toyFolder:GetChildren()) do
+        if child.Name == toyName then
+            if not excludeSet or not excludeSet[child] then
+                found = child
             end
         end
     end
 
-    -- TP within range of the part so range check passes
-    local origCF = hrp.CFrame
-    hrp.Anchored = true
-    if hum then hum.WalkSpeed = 0 end
+    if not found then return nil, nil end
+    local bp = getPartFromToy(found)
+    if not bp then return nil, nil end
 
-    local nearPos = partPos + Vector3.new(3, 0, 0)
-    hrp.CFrame = CFrame.new(nearPos)
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    hrp.AssemblyAngularVelocity = Vector3.zero
-    task.wait(0.1)
+    -- Part just spawned right in front of us — read its actual position
+    local partPos = bp.CFrame.Position
 
-    -- SetNetworkOwner takes the MODEL (raw toy), lookAt from HRP to part
+    -- SetNetworkOwner: pass the RAW TOY (model), lookAt from player to part
     if Remotes.SetNetworkOwner then
         local lookCF = CFrame.lookAt(hrp.Position, partPos)
-        Remotes.SetNetworkOwner:FireServer(rawToy, lookCF)
-        task.wait(0.1)
+        Remotes.SetNetworkOwner:FireServer(found, lookCF)
+        task.wait(0.15)
     end
 
-    -- CreateGrabLine takes the BASEPART, lookAt from HRP to part
+    -- CreateGrabLine: pass the BASEPART, lookAt from player to part
     if Remotes.CreateGrabLine and Remotes.DestroyGrabLine then
         local grabCF = CFrame.lookAt(hrp.Position, partPos)
         Remotes.CreateGrabLine:FireServer(bp, grabCF)
-        task.wait(0.15)
+        task.wait(0.2)
         Remotes.DestroyGrabLine:FireServer(bp)
         task.wait(0.1)
     end
 
-    -- TP back to original position
-    hrp.CFrame = origCF
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    hrp.AssemblyAngularVelocity = Vector3.zero
-    task.wait(0.05)
-
-    hrp.Anchored = false
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    hrp.AssemblyAngularVelocity = Vector3.zero
-
-    -- Restore collision
-    for _, p in ipairs(collisionParts) do
-        if p and p.Parent then p.CanCollide = true end
-    end
-    if hum then hum.WalkSpeed = 16 end
-
-    -- Now we own it — move part to sky target
+    -- Now we own it — move to sky target
     bp.CFrame = targetCF
     bp.AssemblyLinearVelocity = Vector3.zero
     bp.AssemblyAngularVelocity = Vector3.zero
 
-    return true
+    return bp, found
 end
 
 -- ============================================================
@@ -1048,9 +983,9 @@ IORight:AddButton({
 
             local excludeSet = {}
 
-            -- 1. Spawn root near player (on the ground)
-            local spawnCF = hrp.CFrame * CFrame.new(0, 0, -Options.SpawnDist.Value)
-            local rootBP, rootRaw = spawnToyAt(data.root, spawnCF, excludeSet)
+            -- 1. Spawn root near player, claim ownership, move to sky
+            ImportStatusLabel:SetText("Spawning + claiming Root...")
+            local rootBP, rootRaw = spawnClaimAndMove(data.root, skyCF, excludeSet)
             if not rootBP then
                 Notify("Error", "Root (" .. data.root .. ") failed to spawn!", 4)
                 ImportStatusLabel:SetText("Failed (Root)")
@@ -1061,10 +996,6 @@ IORight:AddButton({
             RootPart = rootBP
             RootPartRaw = rootRaw
             if rootRaw then excludeSet[rootRaw] = true end
-
-            -- 2. Grab root to claim network ownership, then move it to sky
-            ImportStatusLabel:SetText("Claiming Root...")
-            claimAndMove(rootRaw, rootBP, skyCF)
             updateLabels()
 
             ImportStatusLabel:SetText("Root in sky! Spawning children...")
@@ -1080,15 +1011,10 @@ IORight:AddButton({
                 -- Target position in sky (relative to root)
                 local targetCF = rootBP.CFrame * offset
 
-                -- Spawn near player on ground
-                local childSpawnCF = hrp.CFrame * CFrame.new(0, 0, -Options.SpawnDist.Value)
-                local bp, raw = spawnToyAt(entry.toy, childSpawnCF, excludeSet)
+                -- Spawn near player, claim, move to sky — all in one
+                local bp, raw = spawnClaimAndMove(entry.toy, targetCF, excludeSet)
                 if bp then
                     if raw then excludeSet[raw] = true end
-
-                    -- Grab, claim ownership, move to sky position
-                    ImportStatusLabel:SetText("Moving #" .. i .. " to sky...")
-                    claimAndMove(raw, bp, targetCF)
 
                     table.insert(Children, {
                         part   = bp,
