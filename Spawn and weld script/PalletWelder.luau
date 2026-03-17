@@ -236,40 +236,16 @@ local function spawnToyAt(toyName, worldCF, excludeSet)
     return getPartFromToy(found), found
 end
 
--- Claim network ownership of a part:
--- TP near it, fire SetNetworkOwner with lookAt CFrame, grab+release, then anchor it.
-local function claimAndAnchor(part)
+-- Claim network ownership of a part and move it to a target position:
+-- Get close, fire SetNetworkOwner(part, lookAtCFrame), grab+release, move part to targetCF.
+-- Player stays on the ground the whole time.
+local function claimAndMove(part, targetCF)
     if not part or not part.Parent then return false end
 
     local hrp = getRoot()
     if not hrp then return false end
 
-    local hum = getHum()
-    local char = LP.Character
-
-    -- Disable collision during TP
-    local collisionParts = {}
-    if char then
-        for _, p in ipairs(char:GetDescendants()) do
-            if p:IsA("BasePart") and p.CanCollide then
-                p.CanCollide = false
-                table.insert(collisionParts, p)
-            end
-        end
-    end
-
-    local origCF = hrp.CFrame
-    hrp.Anchored = true
-    if hum then hum.WalkSpeed = 0 end
-
-    -- TP 3 studs next to the part
-    local nearCF = part.CFrame * CFrame.new(3, 0, 0)
-    hrp.CFrame = nearCF
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    hrp.AssemblyAngularVelocity = Vector3.zero
-    task.wait(0.1)
-
-    -- Fire SetNetworkOwner with lookAt CFrame (from HRP to target)
+    -- Fire SetNetworkOwner with lookAt CFrame (from HRP to target part)
     if Remotes.SetNetworkOwner then
         local lookCF = CFrame.lookAt(hrp.Position, part.Position)
         Remotes.SetNetworkOwner:FireServer(part, lookCF)
@@ -285,25 +261,10 @@ local function claimAndAnchor(part)
         task.wait(0.1)
     end
 
-    -- Anchor the part so it stays in the sky
-    part.Anchored = true
+    -- Now we have network ownership — move part to sky target
+    part.CFrame = targetCF
     part.AssemblyLinearVelocity = Vector3.zero
     part.AssemblyAngularVelocity = Vector3.zero
-
-    -- TP back, restore state
-    hrp.CFrame = origCF
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    hrp.AssemblyAngularVelocity = Vector3.zero
-    task.wait(0.05)
-
-    hrp.Anchored = false
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    hrp.AssemblyAngularVelocity = Vector3.zero
-
-    for _, p in ipairs(collisionParts) do
-        if p and p.Parent then p.CanCollide = true end
-    end
-    if hum then hum.WalkSpeed = 16 end
 
     return true
 end
@@ -969,100 +930,11 @@ IOLeft:AddButton({
 
 -- ---- IMPORT ----
 
--- Floating paste box (outside Obsidian since AddInput doesn't exist)
-local ImportGui = Instance.new("ScreenGui")
-ImportGui.Name = "PalletWelderImport"
-ImportGui.ResetOnSpawn = false
-ImportGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ImportGui.DisplayOrder = 100
-ImportGui.Parent = (gethui and gethui()) or LP:WaitForChild("PlayerGui")
-
-local ImportBG = Instance.new("Frame")
-ImportBG.Name = "BG"
-ImportBG.Size = UDim2.new(0, 520, 0, 260)
-ImportBG.Position = UDim2.new(0.5, -260, 0.5, -130)
-ImportBG.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
-ImportBG.BorderSizePixel = 0
-ImportBG.Visible = false
-ImportBG.Parent = ImportGui
-
-local bgCorner = Instance.new("UICorner")
-bgCorner.CornerRadius = UDim.new(0, 10)
-bgCorner.Parent = ImportBG
-
-local ImportTitleBar = Instance.new("TextLabel")
-ImportTitleBar.Size = UDim2.new(1, 0, 0, 32)
-ImportTitleBar.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
-ImportTitleBar.BorderSizePixel = 0
-ImportTitleBar.Text = "  Paste Build JSON"
-ImportTitleBar.TextColor3 = Color3.fromRGB(255, 255, 255)
-ImportTitleBar.TextSize = 14
-ImportTitleBar.Font = Enum.Font.GothamBold
-ImportTitleBar.TextXAlignment = Enum.TextXAlignment.Left
-ImportTitleBar.Parent = ImportBG
-
-local titleBarCorner = Instance.new("UICorner")
-titleBarCorner.CornerRadius = UDim.new(0, 10)
-titleBarCorner.Parent = ImportTitleBar
-
-local ImportTextBox = Instance.new("TextBox")
-ImportTextBox.Name = "JsonInput"
-ImportTextBox.Size = UDim2.new(1, -16, 1, -80)
-ImportTextBox.Position = UDim2.new(0, 8, 0, 36)
-ImportTextBox.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
-ImportTextBox.BorderSizePixel = 0
-ImportTextBox.Text = ""
-ImportTextBox.PlaceholderText = "Paste your build JSON here..."
-ImportTextBox.TextColor3 = Color3.fromRGB(150, 255, 150)
-ImportTextBox.TextSize = 11
-ImportTextBox.Font = Enum.Font.Code
-ImportTextBox.TextWrapped = true
-ImportTextBox.TextYAlignment = Enum.TextYAlignment.Top
-ImportTextBox.TextXAlignment = Enum.TextXAlignment.Left
-ImportTextBox.ClearTextOnFocus = false
-ImportTextBox.TextEditable = true
-ImportTextBox.MultiLine = true
-ImportTextBox.Parent = ImportBG
-
-local inputCorner = Instance.new("UICorner")
-inputCorner.CornerRadius = UDim.new(0, 6)
-inputCorner.Parent = ImportTextBox
-
-local ImportGoBtn = Instance.new("TextButton")
-ImportGoBtn.Name = "Go"
-ImportGoBtn.Size = UDim2.new(0.5, -12, 0, 30)
-ImportGoBtn.Position = UDim2.new(0, 8, 1, -38)
-ImportGoBtn.BackgroundColor3 = Color3.fromRGB(40, 120, 60)
-ImportGoBtn.BorderSizePixel = 0
-ImportGoBtn.Text = "Import Build"
-ImportGoBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-ImportGoBtn.TextSize = 14
-ImportGoBtn.Font = Enum.Font.GothamBold
-ImportGoBtn.Parent = ImportBG
-
-local goBtnCorner = Instance.new("UICorner")
-goBtnCorner.CornerRadius = UDim.new(0, 6)
-goBtnCorner.Parent = ImportGoBtn
-
-local ImportCancelBtn = Instance.new("TextButton")
-ImportCancelBtn.Name = "Cancel"
-ImportCancelBtn.Size = UDim2.new(0.5, -12, 0, 30)
-ImportCancelBtn.Position = UDim2.new(0.5, 4, 1, -38)
-ImportCancelBtn.BackgroundColor3 = Color3.fromRGB(120, 40, 40)
-ImportCancelBtn.BorderSizePixel = 0
-ImportCancelBtn.Text = "Cancel"
-ImportCancelBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-ImportCancelBtn.TextSize = 14
-ImportCancelBtn.Font = Enum.Font.GothamBold
-ImportCancelBtn.Parent = ImportBG
-
-local cancelBtnCorner = Instance.new("UICorner")
-cancelBtnCorner.CornerRadius = UDim.new(0, 6)
-cancelBtnCorner.Parent = ImportCancelBtn
-
-ImportCancelBtn.MouseButton1Click:Connect(function()
-    ImportBG.Visible = false
-end)
+IORight:AddInput("ImportJSON", {
+    Text     = "Import JSON",
+    Default  = "",
+    Placeholder = "Paste JSON here...",
+})
 
 IORight:AddSlider("SkyHeight", {
     Text    = "Sky Height",
@@ -1074,15 +946,18 @@ IORight:AddSlider("SkyHeight", {
     Tooltip = "How high above you to build in the sky",
 })
 
-local ImportStatusLabel = IORight:AddLabel("Copy JSON to clipboard, then click Import.")
+local ImportStatusLabel = IORight:AddLabel("Paste JSON above, then click Import.")
 
--- Function to run the actual import (called from the Go button)
-local function doImport(json)
-    task.spawn(function()
-        if not json or json == "" then
-            Notify("Error", "No JSON provided!", 3)
-            return
-        end
+IORight:AddButton({
+    Text    = "Import Build",
+    Tooltip = "Spawns build in sky with auto network ownership",
+    Func    = function()
+        task.spawn(function()
+            local json = Options.ImportJSON and Options.ImportJSON.Value
+            if not json or json == "" then
+                Notify("Error", "Paste JSON into the input first!", 3)
+                return
+            end
 
             local ok, data = pcall(function()
                 return HttpService:JSONDecode(json)
@@ -1118,20 +993,19 @@ local function doImport(json)
             Children = {}
 
             local skyHeight = Options.SkyHeight and Options.SkyHeight.Value or 300
-
-            -- Spawn root above the player at sky height
             local playerPos = hrp.Position
-            local rootSpawnCF = CFrame.new(playerPos.X, playerPos.Y + skyHeight, playerPos.Z)
+            -- Sky position for the root (directly above player)
+            local skyCF = CFrame.new(playerPos.X, playerPos.Y + skyHeight, playerPos.Z)
 
             ImportStatusLabel:SetText("Spawning Root...")
             StatusLabel:SetText("Importing...")
-            Notify("Import", "Spawning root in the sky...", 3)
+            Notify("Import", "Spawning root near you...", 3)
 
-            -- Build exclude set as we go
             local excludeSet = {}
 
-            -- 1. Spawn root
-            local rootBP, rootRaw = spawnToyAt(data.root, rootSpawnCF, excludeSet)
+            -- 1. Spawn root near player (on the ground)
+            local spawnCF = hrp.CFrame * CFrame.new(0, 0, -Options.SpawnDist.Value)
+            local rootBP, rootRaw = spawnToyAt(data.root, spawnCF, excludeSet)
             if not rootBP then
                 Notify("Error", "Root (" .. data.root .. ") failed to spawn!", 4)
                 ImportStatusLabel:SetText("Failed (Root)")
@@ -1143,44 +1017,33 @@ local function doImport(json)
             RootPartRaw = rootRaw
             if rootRaw then excludeSet[rootRaw] = true end
 
-            -- 2. Claim network ownership + anchor root
-            ImportStatusLabel:SetText("Claiming Root ownership...")
-            claimAndAnchor(rootBP)
-            -- Move root to exact sky position (it may have drifted)
-            rootBP.CFrame = rootSpawnCF
-            rootBP.Anchored = true
+            -- 2. Grab root to claim network ownership, then move it to sky
+            ImportStatusLabel:SetText("Claiming Root...")
+            claimAndMove(rootBP, skyCF)
             updateLabels()
 
-            ImportStatusLabel:SetText("Root OK! Spawning children...")
-            Notify("Import", "Root claimed! Spawning " .. #data.children .. " children...", 3)
+            ImportStatusLabel:SetText("Root in sky! Spawning children...")
+            Notify("Import", "Root placed! Spawning " .. #data.children .. " children...", 3)
 
             local spawned = 0
             local failed = 0
-            local highestY = rootBP.Position.Y
 
             for i, entry in ipairs(data.children) do
                 ImportStatusLabel:SetText("Spawning #" .. i .. "/" .. #data.children .. " (" .. (entry.toy or "?") .. ")")
 
-                -- Calculate world CFrame: root position * stored offset
                 local offset = arrayToCf(entry.offset)
-                local worldCF = rootBP.CFrame * offset
+                -- Target position in sky (relative to root)
+                local targetCF = rootBP.CFrame * offset
 
-                -- 3. Spawn child
-                local bp, raw = spawnToyAt(entry.toy, worldCF, excludeSet)
+                -- Spawn near player on ground
+                local childSpawnCF = hrp.CFrame * CFrame.new(0, 0, -Options.SpawnDist.Value)
+                local bp, raw = spawnToyAt(entry.toy, childSpawnCF, excludeSet)
                 if bp then
                     if raw then excludeSet[raw] = true end
 
-                    -- 4. Claim network ownership + anchor child
-                    ImportStatusLabel:SetText("Claiming #" .. i .. "/" .. #data.children .. "...")
-                    claimAndAnchor(bp)
-                    -- Move to exact position (may have drifted during claim)
-                    bp.CFrame = worldCF
-                    bp.Anchored = true
-
-                    -- Track highest Y for final TP
-                    if bp.Position.Y > highestY then
-                        highestY = bp.Position.Y
-                    end
+                    -- Grab, claim ownership, move to sky position
+                    ImportStatusLabel:SetText("Moving #" .. i .. " to sky...")
+                    claimAndMove(bp, targetCF)
 
                     table.insert(Children, {
                         part   = bp,
@@ -1194,9 +1057,16 @@ local function doImport(json)
                 end
             end
 
-            -- 5. TP player above the highest part
-            local finalPos = Vector3.new(playerPos.X, highestY + 10, playerPos.Z)
-            hrp.CFrame = CFrame.new(finalPos)
+            -- All done — activate weld
+            ImportStatusLabel:SetText("Activating weld...")
+            if Toggles.CFrameWeld then
+                Toggles.CFrameWeld:SetValue(true)
+            end
+
+            -- TP player 20 studs above root
+            task.wait(0.2)
+            local rootPos = rootBP.Position
+            hrp.CFrame = CFrame.new(rootPos.X, rootPos.Y + 20, rootPos.Z)
             hrp.AssemblyLinearVelocity = Vector3.zero
             hrp.AssemblyAngularVelocity = Vector3.zero
 
@@ -1208,35 +1078,14 @@ local function doImport(json)
                 msg = msg .. ", " .. failed .. " failed"
             end
             ImportStatusLabel:SetText(msg)
-            Notify("Import", msg .. "\nAll anchored in sky! Toggle CFrame Weld to activate.", 6)
+            Notify("Import", msg .. "\nWeld active! Grab Root to move.", 6)
         end)
-end
-
--- Wire up the Go button on the paste box
-ImportGoBtn.MouseButton1Click:Connect(function()
-    local json = ImportTextBox.Text
-    if not json or json == "" then
-        Notify("Error", "Paste JSON into the box first!", 3)
-        return
-    end
-    ImportBG.Visible = false
-    doImport(json)
-end)
-
--- Obsidian button just opens the paste box
-IORight:AddButton({
-    Text    = "Import Build",
-    Tooltip = "Opens a paste box to enter build JSON",
-    Func    = function()
-        ImportTextBox.Text = ""
-        ImportBG.Visible = true
-        ImportTextBox:CaptureFocus()
     end,
 })
 
 IORight:AddDivider()
 IORight:AddLabel({
-    Text     = "After importing:\n1. Parts auto-claimed + anchored\n2. Toggle CFrame Weld to\n   unanchor + weld all!\n3. Grab Root to move.",
+    Text     = "Import flow:\n1. Spawns each part near you\n2. Auto-grabs for net ownership\n3. Moves to sky position\n4. Auto-welds + TPs you up\n5. Grab Root to fly!",
     DoesWrap = true,
 })
 
