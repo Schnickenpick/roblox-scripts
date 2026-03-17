@@ -93,6 +93,10 @@ local function getRoot()
     return char and char:FindFirstChild("HumanoidRootPart")
 end
 
+local function getHum()
+    return LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+end
+
 local function getToyFolder()
     return workspace:FindFirstChild(LP.Name .. "SpawnedInToys")
 end
@@ -230,6 +234,78 @@ local function spawnToyAt(toyName, worldCF, excludeSet)
 
     if not found then return nil, nil end
     return getPartFromToy(found), found
+end
+
+-- Claim network ownership of a part:
+-- TP near it, fire SetNetworkOwner with lookAt CFrame, grab+release, then anchor it.
+local function claimAndAnchor(part)
+    if not part or not part.Parent then return false end
+
+    local hrp = getRoot()
+    if not hrp then return false end
+
+    local hum = getHum()
+    local char = LP.Character
+
+    -- Disable collision during TP
+    local collisionParts = {}
+    if char then
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") and p.CanCollide then
+                p.CanCollide = false
+                table.insert(collisionParts, p)
+            end
+        end
+    end
+
+    local origCF = hrp.CFrame
+    hrp.Anchored = true
+    if hum then hum.WalkSpeed = 0 end
+
+    -- TP 3 studs next to the part
+    local nearCF = part.CFrame * CFrame.new(3, 0, 0)
+    hrp.CFrame = nearCF
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+    task.wait(0.1)
+
+    -- Fire SetNetworkOwner with lookAt CFrame (from HRP to target)
+    if Remotes.SetNetworkOwner then
+        local lookCF = CFrame.lookAt(hrp.Position, part.Position)
+        Remotes.SetNetworkOwner:FireServer(part, lookCF)
+        task.wait(0.1)
+    end
+
+    -- Grab + release to solidify ownership
+    if Remotes.CreateGrabLine and Remotes.DestroyGrabLine then
+        local grabCF = CFrame.lookAt(hrp.Position, part.Position)
+        Remotes.CreateGrabLine:FireServer(part, grabCF)
+        task.wait(0.15)
+        Remotes.DestroyGrabLine:FireServer(part)
+        task.wait(0.1)
+    end
+
+    -- Anchor the part so it stays in the sky
+    part.Anchored = true
+    part.AssemblyLinearVelocity = Vector3.zero
+    part.AssemblyAngularVelocity = Vector3.zero
+
+    -- TP back, restore state
+    hrp.CFrame = origCF
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+    task.wait(0.05)
+
+    hrp.Anchored = false
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+
+    for _, p in ipairs(collisionParts) do
+        if p and p.Parent then p.CanCollide = true end
+    end
+    if hum then hum.WalkSpeed = 16 end
+
+    return true
 end
 
 -- ============================================================
@@ -514,19 +590,27 @@ local function startWeld()
         Notify("Error", "No child parts! Add some first.", 3)
         return
     end
+
+    -- Unanchor root + all children (needed after import where everything is anchored in sky)
     if RootPart.Anchored then
-        Notify("Error", "Root is Anchored — can't CFrame weld!", 3)
-        return
+        RootPart.Anchored = false
+        RootPart.AssemblyLinearVelocity = Vector3.zero
+        RootPart.AssemblyAngularVelocity = Vector3.zero
     end
 
     local valid = 0
     for _, child in ipairs(Children) do
-        if child.part and child.part.Parent and not child.part.Anchored then
+        if child.part and child.part.Parent then
+            if child.part.Anchored then
+                child.part.Anchored = false
+                child.part.AssemblyLinearVelocity = Vector3.zero
+                child.part.AssemblyAngularVelocity = Vector3.zero
+            end
             valid += 1
         end
     end
     if valid == 0 then
-        Notify("Error", "All children are destroyed or anchored!", 3)
+        Notify("Error", "All children are destroyed!", 3)
         return
     end
 
@@ -885,11 +969,21 @@ IOLeft:AddButton({
 
 -- ---- IMPORT ----
 
+IORight:AddSlider("SkyHeight", {
+    Text    = "Sky Height",
+    Default = 300,
+    Min     = 50,
+    Max     = 1000,
+    Rounding = 0,
+    Suffix  = " studs",
+    Tooltip = "How high above you to build in the sky",
+})
+
 local ImportStatusLabel = IORight:AddLabel("Copy JSON to clipboard, then click Import.")
 
 IORight:AddButton({
     Text    = "Import from Clipboard",
-    Tooltip = "Reads JSON from your clipboard and spawns the build",
+    Tooltip = "Spawns build in sky, auto-claims network ownership, anchors everything",
     Func    = function()
         task.spawn(function()
             local clipRead = readclipboard or getclipboard
@@ -908,7 +1002,7 @@ IORight:AddButton({
                 return HttpService:JSONDecode(json)
             end)
             if not ok or type(data) ~= "table" then
-                Notify("Error", "Invalid JSON!", 3)
+                Notify("Error", "Invalid JSON! " .. tostring(data), 4)
                 return
             end
 
@@ -917,8 +1011,8 @@ IORight:AddButton({
                 return
             end
 
-            local root = getRoot()
-            if not root then
+            local hrp = getRoot()
+            if not hrp then
                 Notify("Error", "No character!", 3)
                 return
             end
@@ -937,16 +1031,20 @@ IORight:AddButton({
             -- Clear existing build
             Children = {}
 
-            -- The root spawns in front of the player
-            local rootSpawnCF = root.CFrame * CFrame.new(0, 0, -Options.SpawnDist.Value)
+            local skyHeight = Options.SkyHeight and Options.SkyHeight.Value or 300
+
+            -- Spawn root above the player at sky height
+            local playerPos = hrp.Position
+            local rootSpawnCF = CFrame.new(playerPos.X, playerPos.Y + skyHeight, playerPos.Z)
 
             ImportStatusLabel:SetText("Spawning Root...")
             StatusLabel:SetText("Importing...")
+            Notify("Import", "Spawning root in the sky...", 3)
 
             -- Build exclude set as we go
             local excludeSet = {}
 
-            -- Spawn root
+            -- 1. Spawn root
             local rootBP, rootRaw = spawnToyAt(data.root, rootSpawnCF, excludeSet)
             if not rootBP then
                 Notify("Error", "Root (" .. data.root .. ") failed to spawn!", 4)
@@ -958,24 +1056,45 @@ IORight:AddButton({
             RootPart = rootBP
             RootPartRaw = rootRaw
             if rootRaw then excludeSet[rootRaw] = true end
+
+            -- 2. Claim network ownership + anchor root
+            ImportStatusLabel:SetText("Claiming Root ownership...")
+            claimAndAnchor(rootBP)
+            -- Move root to exact sky position (it may have drifted)
+            rootBP.CFrame = rootSpawnCF
+            rootBP.Anchored = true
             updateLabels()
 
             ImportStatusLabel:SetText("Root OK! Spawning children...")
-            Notify("Import", "Root spawned! Now spawning " .. #data.children .. " children...", 3)
+            Notify("Import", "Root claimed! Spawning " .. #data.children .. " children...", 3)
 
             local spawned = 0
             local failed = 0
+            local highestY = rootBP.Position.Y
 
             for i, entry in ipairs(data.children) do
-                ImportStatusLabel:SetText("Spawning #" .. i .. " / " .. #data.children .. " (" .. (entry.toy or "?") .. ")")
+                ImportStatusLabel:SetText("Spawning #" .. i .. "/" .. #data.children .. " (" .. (entry.toy or "?") .. ")")
 
                 -- Calculate world CFrame: root position * stored offset
                 local offset = arrayToCf(entry.offset)
                 local worldCF = rootBP.CFrame * offset
 
+                -- 3. Spawn child
                 local bp, raw = spawnToyAt(entry.toy, worldCF, excludeSet)
                 if bp then
                     if raw then excludeSet[raw] = true end
+
+                    -- 4. Claim network ownership + anchor child
+                    ImportStatusLabel:SetText("Claiming #" .. i .. "/" .. #data.children .. "...")
+                    claimAndAnchor(bp)
+                    -- Move to exact position (may have drifted during claim)
+                    bp.CFrame = worldCF
+                    bp.Anchored = true
+
+                    -- Track highest Y for final TP
+                    if bp.Position.Y > highestY then
+                        highestY = bp.Position.Y
+                    end
 
                     table.insert(Children, {
                         part   = bp,
@@ -989,6 +1108,12 @@ IORight:AddButton({
                 end
             end
 
+            -- 5. TP player above the highest part
+            local finalPos = Vector3.new(playerPos.X, highestY + 10, playerPos.Z)
+            hrp.CFrame = CFrame.new(finalPos)
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+
             StatusLabel:SetText("Idle")
             updateLabels()
 
@@ -997,14 +1122,14 @@ IORight:AddButton({
                 msg = msg .. ", " .. failed .. " failed"
             end
             ImportStatusLabel:SetText(msg)
-            Notify("Import", msg .. ". Grab all parts for netowner, then toggle weld!", 5)
+            Notify("Import", msg .. "\nAll anchored in sky! Toggle CFrame Weld to activate.", 6)
         end)
     end,
 })
 
 IORight:AddDivider()
 IORight:AddLabel({
-    Text     = "After importing:\n1. Grab each part to get\n   network ownership\n2. Toggle CFrame Weld\n3. Grab Root to move all!",
+    Text     = "After importing:\n1. Parts auto-claimed + anchored\n2. Toggle CFrame Weld to\n   unanchor + weld all!\n3. Grab Root to move.",
     DoesWrap = true,
 })
 
