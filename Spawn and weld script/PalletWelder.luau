@@ -236,32 +236,76 @@ local function spawnToyAt(toyName, worldCF, excludeSet)
     return getPartFromToy(found), found
 end
 
--- Claim network ownership of a part and move it to a target position:
--- Get close, fire SetNetworkOwner(part, lookAtCFrame), grab+release, move part to targetCF.
--- Player stays on the ground the whole time.
+-- Claim network ownership of a part and move it to a target position.
+-- Reads the part's CURRENT CFrame from the toy folder for accurate lookAt.
+-- Player stays on the ground — TPs within range, claims, then moves part to sky.
 local function claimAndMove(part, targetCF)
     if not part or not part.Parent then return false end
 
     local hrp = getRoot()
     if not hrp then return false end
 
-    -- Fire SetNetworkOwner with lookAt CFrame (from HRP to target part)
+    local hum = getHum()
+    local char = LP.Character
+
+    -- Read the part's actual current position in the world
+    local partPos = part.CFrame.Position
+
+    -- Disable collision during TP
+    local collisionParts = {}
+    if char then
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") and p.CanCollide then
+                p.CanCollide = false
+                table.insert(collisionParts, p)
+            end
+        end
+    end
+
+    -- TP within 5 studs of the part so range check passes
+    local origCF = hrp.CFrame
+    hrp.Anchored = true
+    if hum then hum.WalkSpeed = 0 end
+
+    local nearPos = partPos + Vector3.new(3, 0, 0)
+    hrp.CFrame = CFrame.new(nearPos)
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+    task.wait(0.1)
+
+    -- Fire SetNetworkOwner — lookAt from current HRP pos to part's real position
     if Remotes.SetNetworkOwner then
-        local lookCF = CFrame.lookAt(hrp.Position, part.Position)
+        local lookCF = CFrame.lookAt(hrp.Position, partPos)
         Remotes.SetNetworkOwner:FireServer(part, lookCF)
         task.wait(0.1)
     end
 
     -- Grab + release to solidify ownership
     if Remotes.CreateGrabLine and Remotes.DestroyGrabLine then
-        local grabCF = CFrame.lookAt(hrp.Position, part.Position)
+        local grabCF = CFrame.lookAt(hrp.Position, partPos)
         Remotes.CreateGrabLine:FireServer(part, grabCF)
         task.wait(0.15)
         Remotes.DestroyGrabLine:FireServer(part)
         task.wait(0.1)
     end
 
-    -- Now we have network ownership — move part to sky target
+    -- TP back to original position
+    hrp.CFrame = origCF
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+    task.wait(0.05)
+
+    hrp.Anchored = false
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+
+    -- Restore collision
+    for _, p in ipairs(collisionParts) do
+        if p and p.Parent then p.CanCollide = true end
+    end
+    if hum then hum.WalkSpeed = 16 end
+
+    -- Now we own it — move part to sky target
     part.CFrame = targetCF
     part.AssemblyLinearVelocity = Vector3.zero
     part.AssemblyAngularVelocity = Vector3.zero
