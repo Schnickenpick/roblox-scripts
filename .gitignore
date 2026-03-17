@@ -37,3 +37,6 @@ docs/remotes.txt
 research/obfuscted script.luau
 tetris/cube types with remotes.txt
 backup.txt
+Spawn and weld script/editor/SETUP.txt
+Spawn and weld script/editor/EditorClient.luau
+Spawn and weld script/editor/EditorServer.luau

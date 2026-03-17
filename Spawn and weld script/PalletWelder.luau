@@ -137,9 +137,20 @@ local function spawnRootPallet(cf)
     return getPartFromToy(found), found
 end
 
--- CFrame to array of 12 numbers
+-- Round to N decimal places
+local function round(n, d)
+    local m = 10 ^ (d or 4)
+    return math.floor(n * m + 0.5) / m
+end
+
+-- CFrame to array of 12 rounded numbers
 local function cfToArray(cf)
-    return { cf:GetComponents() }
+    local c = { cf:GetComponents() }
+    local arr = {}
+    for i = 1, 12 do
+        arr[i] = round(c[i], 4)
+    end
+    return arr
 end
 
 -- Array of 12 numbers to CFrame
@@ -157,19 +168,52 @@ local function spawnToyAt(toyName, worldCF, excludeSet)
     local root = getRoot()
     if not root then return nil, nil end
 
-    -- Anchor + teleport near the spawn position so range check passes
+    -- Save original state
     local origCF = root.CFrame
+    local hum = getHum()
+
+    -- Anchor + disable collision + teleport near spawn position so range check passes
     root.Anchored = true
+    if hum then hum.WalkSpeed = 0 end
+
+    -- Disable collision on all character parts while teleporting
+    local char = LP.Character
+    local collisionParts = {}
+    if char then
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") and p.CanCollide then
+                p.CanCollide = false
+                table.insert(collisionParts, p)
+            end
+        end
+    end
+
     root.CFrame = worldCF * CFrame.new(3, 0, 0)
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
     task.wait(0.1)
 
     Remotes.SpawnToy:InvokeServer(toyName, worldCF, Vector3.new(0, 0, 0))
     task.wait(0.3)
 
-    -- Teleport back + unanchor
+    -- Teleport back IMMEDIATELY, kill all velocity
     root.CFrame = origCF
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
     task.wait(0.05)
+
+    -- Restore state
     root.Anchored = false
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+
+    -- Restore collision
+    for _, p in ipairs(collisionParts) do
+        if p and p.Parent then
+            p.CanCollide = true
+        end
+    end
+    if hum then hum.WalkSpeed = 16 end
 
     -- Find the spawned toy
     local toyFolder = getToyFolder()
@@ -781,13 +825,6 @@ local HttpService = game:GetService("HttpService")
 
 -- ---- EXPORT ----
 
-IOLeft:AddInput("BuildName", {
-    Text     = "Build Name",
-    Default  = "",
-    Placeholder = "My Boat (optional)",
-    Tooltip  = "Name for the export. If empty, uses date/time.",
-})
-
 local ExportOutput = IOLeft:AddLabel("Export output will appear here.")
 
 IOLeft:AddButton({
@@ -803,30 +840,28 @@ IOLeft:AddButton({
             return
         end
 
-        local buildName = Options.BuildName.Value
-        if not buildName or buildName == "" then
-            buildName = "Build_" .. os.date("%Y-%m-%d_%H-%M-%S")
-        end
+        local buildName = "Build_" .. os.date("%Y-%m-%d_%H-%M-%S")
 
-        local data = {
-            version  = 1,
-            name     = buildName,
-            root     = RootPartRaw and RootPartRaw.Name or "PalletLightBrown",
-            children = {},
-        }
+        local rootName = RootPartRaw and RootPartRaw.Name or "PalletLightBrown"
 
+        -- Build JSON string manually to ensure clean array format
+        local childrenStr = {}
+        local count = 0
         for _, child in ipairs(Children) do
             if child.part and child.part.Parent then
-                table.insert(data.children, {
-                    toy    = child.name or "Unknown",
-                    offset = cfToArray(child.offset),
-                })
+                local arr = cfToArray(child.offset)
+                local offsetStr = "[" .. table.concat(arr, ",") .. "]"
+                local toyName = (child.name or "Unknown"):gsub('"', '\\"')
+                table.insert(childrenStr, '{"toy":"' .. toyName .. '","offset":' .. offsetStr .. '}')
+                count += 1
             end
         end
 
-        local json = HttpService:JSONEncode(data)
+        local safeName = buildName:gsub('"', '\\"')
+        local json = '{"version":1,"name":"' .. safeName .. '","root":"' .. rootName .. '","children":[' .. table.concat(childrenStr, ",") .. ']}'
+
         ExportOutput:SetText(json)
-        Notify("Export", "Build exported! " .. #data.children .. " parts. Use Copy button.", 4)
+        Notify("Export", "Build exported! " .. count .. " parts. Use Copy button.", 4)
     end,
 })
 
@@ -850,23 +885,22 @@ IOLeft:AddButton({
 
 -- ---- IMPORT ----
 
-IORight:AddInput("ImportJSON", {
-    Text     = "Import JSON",
-    Default  = "",
-    Placeholder = "Paste JSON here...",
-    Tooltip  = "Paste an exported build JSON to import it",
-})
-
-local ImportStatusLabel = IORight:AddLabel("Ready to import.")
+local ImportStatusLabel = IORight:AddLabel("Copy JSON to clipboard, then click Import.")
 
 IORight:AddButton({
-    Text    = "Import Build",
-    Tooltip = "Spawns Root + all children from the pasted JSON at their correct offsets",
+    Text    = "Import from Clipboard",
+    Tooltip = "Reads JSON from your clipboard and spawns the build",
     Func    = function()
         task.spawn(function()
-            local json = Options.ImportJSON.Value
+            local clipRead = readclipboard or getclipboard
+            if not clipRead then
+                Notify("Error", "Clipboard reading not available on your executor!", 3)
+                return
+            end
+
+            local json = clipRead()
             if not json or json == "" then
-                Notify("Error", "Paste JSON first!", 3)
+                Notify("Error", "Clipboard is empty! Copy the JSON first.", 3)
                 return
             end
 
