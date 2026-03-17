@@ -236,11 +236,12 @@ local function spawnToyAt(toyName, worldCF, excludeSet)
     return getPartFromToy(found), found
 end
 
--- Claim network ownership of a part and move it to a target position.
--- Reads the part's CURRENT CFrame from the toy folder for accurate lookAt.
--- Player stays on the ground — TPs within range, claims, then moves part to sky.
-local function claimAndMove(part, targetCF)
-    if not part or not part.Parent then return false end
+-- Claim network ownership of a toy and move its BasePart to a target position.
+-- rawToy = the model/entry in the toy folder (for SetNetworkOwner)
+-- bp     = the actual BasePart inside (for CreateGrabLine)
+-- targetCF = where to move it after claiming
+local function claimAndMove(rawToy, bp, targetCF)
+    if not bp or not bp.Parent then return false end
 
     local hrp = getRoot()
     if not hrp then return false end
@@ -249,7 +250,7 @@ local function claimAndMove(part, targetCF)
     local char = LP.Character
 
     -- Read the part's actual current position in the world
-    local partPos = part.CFrame.Position
+    local partPos = bp.CFrame.Position
 
     -- Disable collision during TP
     local collisionParts = {}
@@ -262,7 +263,7 @@ local function claimAndMove(part, targetCF)
         end
     end
 
-    -- TP within 5 studs of the part so range check passes
+    -- TP within range of the part so range check passes
     local origCF = hrp.CFrame
     hrp.Anchored = true
     if hum then hum.WalkSpeed = 0 end
@@ -273,19 +274,19 @@ local function claimAndMove(part, targetCF)
     hrp.AssemblyAngularVelocity = Vector3.zero
     task.wait(0.1)
 
-    -- Fire SetNetworkOwner — lookAt from current HRP pos to part's real position
+    -- SetNetworkOwner takes the MODEL (raw toy), lookAt from HRP to part
     if Remotes.SetNetworkOwner then
         local lookCF = CFrame.lookAt(hrp.Position, partPos)
-        Remotes.SetNetworkOwner:FireServer(part, lookCF)
+        Remotes.SetNetworkOwner:FireServer(rawToy, lookCF)
         task.wait(0.1)
     end
 
-    -- Grab + release to solidify ownership
+    -- CreateGrabLine takes the BASEPART, lookAt from HRP to part
     if Remotes.CreateGrabLine and Remotes.DestroyGrabLine then
         local grabCF = CFrame.lookAt(hrp.Position, partPos)
-        Remotes.CreateGrabLine:FireServer(part, grabCF)
+        Remotes.CreateGrabLine:FireServer(bp, grabCF)
         task.wait(0.15)
-        Remotes.DestroyGrabLine:FireServer(part)
+        Remotes.DestroyGrabLine:FireServer(bp)
         task.wait(0.1)
     end
 
@@ -306,9 +307,9 @@ local function claimAndMove(part, targetCF)
     if hum then hum.WalkSpeed = 16 end
 
     -- Now we own it — move part to sky target
-    part.CFrame = targetCF
-    part.AssemblyLinearVelocity = Vector3.zero
-    part.AssemblyAngularVelocity = Vector3.zero
+    bp.CFrame = targetCF
+    bp.AssemblyLinearVelocity = Vector3.zero
+    bp.AssemblyAngularVelocity = Vector3.zero
 
     return true
 end
@@ -1063,7 +1064,7 @@ IORight:AddButton({
 
             -- 2. Grab root to claim network ownership, then move it to sky
             ImportStatusLabel:SetText("Claiming Root...")
-            claimAndMove(rootBP, skyCF)
+            claimAndMove(rootRaw, rootBP, skyCF)
             updateLabels()
 
             ImportStatusLabel:SetText("Root in sky! Spawning children...")
@@ -1087,7 +1088,7 @@ IORight:AddButton({
 
                     -- Grab, claim ownership, move to sky position
                     ImportStatusLabel:SetText("Moving #" .. i .. " to sky...")
-                    claimAndMove(bp, targetCF)
+                    claimAndMove(raw, bp, targetCF)
 
                     table.insert(Children, {
                         part   = bp,
