@@ -282,11 +282,25 @@ local function spawnClaimAndMove(toyName, targetCF, excludeSet)
         warn("[Import] Failed to claim " .. toyName .. " after " .. MAX_CLAIM_RETRIES .. " attempts")
     end
 
-    -- Move to sky target + anchor so it doesn't fall
+    -- Move to sky target + anchor ALL parts so nothing falls
     bp.CFrame = targetCF
-    bp.Anchored = true
     bp.AssemblyLinearVelocity = Vector3.zero
     bp.AssemblyAngularVelocity = Vector3.zero
+
+    -- Anchor every BasePart in the model
+    if found:IsA("Model") then
+        for _, p in ipairs(found:GetDescendants()) do
+            if p:IsA("BasePart") then
+                p.Anchored = true
+                p.AssemblyLinearVelocity = Vector3.zero
+                p.AssemblyAngularVelocity = Vector3.zero
+            end
+        end
+    elseif found:IsA("BasePart") then
+        found.Anchored = true
+    end
+
+    warn("[Import] " .. toyName .. " moved to sky + anchored | Pos: " .. tostring(bp.Position))
 
     return bp, found
 end
@@ -575,7 +589,16 @@ local function startWeld()
     end
 
     -- Unanchor root + all children (needed after import where everything is anchored in sky)
-    if RootPart.Anchored then
+    -- Unanchor all parts in RootPartRaw (the model)
+    if RootPartRaw and RootPartRaw:IsA("Model") then
+        for _, p in ipairs(RootPartRaw:GetDescendants()) do
+            if p:IsA("BasePart") then
+                p.Anchored = false
+                p.AssemblyLinearVelocity = Vector3.zero
+                p.AssemblyAngularVelocity = Vector3.zero
+            end
+        end
+    elseif RootPart and RootPart.Anchored then
         RootPart.Anchored = false
         RootPart.AssemblyLinearVelocity = Vector3.zero
         RootPart.AssemblyAngularVelocity = Vector3.zero
@@ -584,7 +607,16 @@ local function startWeld()
     local valid = 0
     for _, child in ipairs(Children) do
         if child.part and child.part.Parent then
-            if child.part.Anchored then
+            -- Unanchor all parts in the raw model
+            if child.raw and child.raw:IsA("Model") then
+                for _, p in ipairs(child.raw:GetDescendants()) do
+                    if p:IsA("BasePart") then
+                        p.Anchored = false
+                        p.AssemblyLinearVelocity = Vector3.zero
+                        p.AssemblyAngularVelocity = Vector3.zero
+                    end
+                end
+            elseif child.part.Anchored then
                 child.part.Anchored = false
                 child.part.AssemblyLinearVelocity = Vector3.zero
                 child.part.AssemblyAngularVelocity = Vector3.zero
