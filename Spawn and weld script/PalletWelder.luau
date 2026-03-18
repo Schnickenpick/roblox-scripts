@@ -282,8 +282,9 @@ local function spawnClaimAndMove(toyName, targetCF, excludeSet)
         warn("[Import] Failed to claim " .. toyName .. " after " .. MAX_CLAIM_RETRIES .. " attempts")
     end
 
-    -- Move to sky target
+    -- Move to sky target + anchor so it doesn't fall
     bp.CFrame = targetCF
+    bp.Anchored = true
     bp.AssemblyLinearVelocity = Vector3.zero
     bp.AssemblyAngularVelocity = Vector3.zero
 
