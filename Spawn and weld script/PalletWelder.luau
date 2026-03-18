@@ -224,6 +224,16 @@ local function spawnClaimAndMove(toyName, targetCF, excludeSet)
     local bp = getPartFromToy(found)
     if not bp then return nil, nil end
 
+    -- Find SoundPart — this is what the game uses for SetNetworkOwner
+    local soundPart = nil
+    if found:IsA("Model") then
+        soundPart = found:FindFirstChild("SoundPart", true)
+    end
+    -- Fallback to bp if no SoundPart (e.g. for simple BasePart toys)
+    local netPart = soundPart or bp
+
+    warn("[Import] Toy: " .. toyName .. " | SoundPart: " .. tostring(soundPart ~= nil) .. " | NetPart: " .. netPart.Name)
+
     -- Claim with retries + verification
     local claimed = false
     for attempt = 1, MAX_CLAIM_RETRIES do
@@ -233,17 +243,17 @@ local function spawnClaimAndMove(toyName, targetCF, excludeSet)
 
         warn("[Import] Attempt " .. attempt .. " | Part at: " .. tostring(partPos) .. " | Dist: " .. string.format("%.1f", dist))
 
-        -- SetNetworkOwner: BASEPART, player's current HRP CFrame
+        -- SetNetworkOwner: SoundPart (or bp fallback), player's HRP CFrame
         if Remotes.SetNetworkOwner then
-            Remotes.SetNetworkOwner:FireServer(bp, hrp.CFrame)
+            Remotes.SetNetworkOwner:FireServer(netPart, hrp.CFrame)
             task.wait(0.15)
         end
 
-        -- CreateGrabLine: BASEPART, player's current HRP CFrame
+        -- CreateGrabLine: SoundPart (or bp fallback), player's HRP CFrame
         if Remotes.CreateGrabLine and Remotes.DestroyGrabLine then
-            Remotes.CreateGrabLine:FireServer(bp, hrp.CFrame)
+            Remotes.CreateGrabLine:FireServer(netPart, hrp.CFrame)
             task.wait(0.2)
-            Remotes.DestroyGrabLine:FireServer(bp)
+            Remotes.DestroyGrabLine:FireServer(netPart)
             task.wait(0.15)
         end
 
