@@ -192,8 +192,10 @@ local function spawnToyNearby(toyName, excludeSet)
 end
 
 -- Spawn + claim + move in one operation.
--- Spawns toy near player, stays close, claims network ownership, then moves part to targetCF.
+-- Spawns toy near player, claims network ownership with retries, then moves to targetCF.
 -- Returns (BasePart, rawToyEntry) or (nil, nil).
+local MAX_CLAIM_RETRIES = 3
+
 local function spawnClaimAndMove(toyName, targetCF, excludeSet)
     if not Remotes.SpawnToy then return nil, nil end
 
@@ -203,7 +205,7 @@ local function spawnClaimAndMove(toyName, targetCF, excludeSet)
     -- Spawn 5 studs in front of player
     local spawnCF = hrp.CFrame * CFrame.new(0, 0, -5)
     Remotes.SpawnToy:InvokeServer(toyName, spawnCF, Vector3.new(0, 0, 0))
-    task.wait(0.4)
+    task.wait(0.5)
 
     -- Find it in toy folder
     local toyFolder = getToyFolder()
@@ -222,26 +224,55 @@ local function spawnClaimAndMove(toyName, targetCF, excludeSet)
     local bp = getPartFromToy(found)
     if not bp then return nil, nil end
 
-    -- Part just spawned right in front of us — read its actual position
-    local partPos = bp.CFrame.Position
+    -- Claim with retries + verification
+    local claimed = false
+    for attempt = 1, MAX_CLAIM_RETRIES do
+        -- Always re-read the part's CURRENT position (it may have fallen/moved)
+        local partPos = bp.CFrame.Position
+        local dist = (hrp.Position - partPos).Magnitude
 
-    -- SetNetworkOwner: pass the RAW TOY (model), lookAt from player to part
-    if Remotes.SetNetworkOwner then
-        local lookCF = CFrame.lookAt(hrp.Position, partPos)
-        Remotes.SetNetworkOwner:FireServer(found, lookCF)
-        task.wait(0.15)
-    end
+        warn("[Import] Attempt " .. attempt .. " | Part at: " .. tostring(partPos) .. " | Dist: " .. string.format("%.1f", dist))
 
-    -- CreateGrabLine: pass the BASEPART, lookAt from player to part
-    if Remotes.CreateGrabLine and Remotes.DestroyGrabLine then
-        local grabCF = CFrame.lookAt(hrp.Position, partPos)
-        Remotes.CreateGrabLine:FireServer(bp, grabCF)
-        task.wait(0.2)
-        Remotes.DestroyGrabLine:FireServer(bp)
+        -- SetNetworkOwner: BASEPART, player's current HRP CFrame
+        if Remotes.SetNetworkOwner then
+            Remotes.SetNetworkOwner:FireServer(bp, hrp.CFrame)
+            task.wait(0.15)
+        end
+
+        -- CreateGrabLine: BASEPART, player's current HRP CFrame
+        if Remotes.CreateGrabLine and Remotes.DestroyGrabLine then
+            Remotes.CreateGrabLine:FireServer(bp, hrp.CFrame)
+            task.wait(0.2)
+            Remotes.DestroyGrabLine:FireServer(bp)
+            task.wait(0.15)
+        end
+
+        -- Verify: try moving the part and see if it sticks
+        local testCF = bp.CFrame * CFrame.new(0, 1, 0)
+        bp.CFrame = testCF
+        bp.AssemblyLinearVelocity = Vector3.zero
+        bp.AssemblyAngularVelocity = Vector3.zero
         task.wait(0.1)
+
+        local afterPos = bp.CFrame.Position
+        local drift = (afterPos - testCF.Position).Magnitude
+        warn("[Import] Verify drift: " .. string.format("%.2f", drift))
+
+        if drift < 2 then
+            claimed = true
+            warn("[Import] Ownership claimed on attempt " .. attempt)
+            break
+        else
+            warn("[Import] Attempt " .. attempt .. " failed (drift=" .. string.format("%.1f", drift) .. "), retrying...")
+            task.wait(0.3)
+        end
     end
 
-    -- Now we own it — move to sky target
+    if not claimed then
+        warn("[Import] Failed to claim " .. toyName .. " after " .. MAX_CLAIM_RETRIES .. " attempts")
+    end
+
+    -- Move to sky target
     bp.CFrame = targetCF
     bp.AssemblyLinearVelocity = Vector3.zero
     bp.AssemblyAngularVelocity = Vector3.zero
