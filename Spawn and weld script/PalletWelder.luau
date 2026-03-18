@@ -1069,18 +1069,21 @@ IORight:AddButton({
                 end
             end
 
-            -- All done — activate weld
+            -- TP player 20 studs above root BEFORE activating weld
+            local rootPos = rootBP.Position
+            warn("[Import] TPing to " .. tostring(rootPos) .. " + 20 Y")
+            hrp.Anchored = true
+            hrp.CFrame = CFrame.new(rootPos.X, rootPos.Y + 20, rootPos.Z)
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+            task.wait(0.3)
+            hrp.Anchored = false
+
+            -- Now activate weld
             ImportStatusLabel:SetText("Activating weld...")
             if Toggles.CFrameWeld then
                 Toggles.CFrameWeld:SetValue(true)
             end
-
-            -- TP player 20 studs above root
-            task.wait(0.2)
-            local rootPos = rootBP.Position
-            hrp.CFrame = CFrame.new(rootPos.X, rootPos.Y + 20, rootPos.Z)
-            hrp.AssemblyLinearVelocity = Vector3.zero
-            hrp.AssemblyAngularVelocity = Vector3.zero
 
             StatusLabel:SetText("Idle")
             updateLabels()
