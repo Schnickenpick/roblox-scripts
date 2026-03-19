@@ -835,7 +835,9 @@ local function stopRegrab()
     end
 end
 
-Left:AddToggle("AutoRegrab", {
+Right:AddDivider()
+
+Right:AddToggle("AutoRegrab", {
     Text    = "Anti-Steal (Auto Regrab)",
     Default = false,
     Tooltip = "Detects when someone grabs your build and automatically reclaims it",
@@ -849,8 +851,6 @@ Left:AddToggle("AutoRegrab", {
         end
     end,
 })
-
-Left:AddDivider()
 
 -- ============================================================
 -- [[ 14. PLAYER TOYS TAB ]]
