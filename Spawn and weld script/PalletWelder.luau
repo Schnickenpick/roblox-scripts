@@ -53,6 +53,7 @@ local Tabs = {
     Main       = Window:AddTab("Welder",     "layers"),
     Steal      = Window:AddTab("Players",    "users"),
     IO         = Window:AddTab("Import/Export", "save"),
+    Rockets    = Window:AddTab("Rockets",    "zap"),
     UISettings = Window:AddTab("UI",         "settings"),
 }
 
@@ -64,6 +65,9 @@ local StealRight = Tabs.Steal:AddRightGroupbox("Highlights",  "info")
 
 local IOLeft  = Tabs.IO:AddLeftGroupbox("Export",  "box")
 local IORight = Tabs.IO:AddRightGroupbox("Import", "box")
+
+local RocketLeft  = Tabs.Rockets:AddLeftGroupbox("Stockpile",  "box")
+local RocketRight = Tabs.Rockets:AddRightGroupbox("Launch",    "zap")
 
 -- ============================================================
 -- [[ 4. REMOTES ]]
@@ -325,6 +329,13 @@ local ActiveHighlights = {}
 
 -- Click-to-remove connection
 local clickConn = nil
+
+-- Rocket system
+local RocketStockpile = {}    -- { part = BasePart, raw = rawToyEntry }
+local ActiveRockets = {}      -- { part = BasePart, raw = rawToyEntry, conn = RBXScriptConnection, startTime = number }
+local stockpileInProgress = false
+local ROCKET_SKY_HEIGHT = 1000
+local ROCKET_SKY_SPREAD = 5
 
 -- ============================================================
 -- [[ 7. HIGHLIGHT SYSTEM ]]
@@ -714,6 +725,21 @@ Left:AddButton({
         RootPart = nil
         RootPartRaw = nil
         Children = {}
+
+        -- Clear rocket stockpile
+        for _, r in ipairs(RocketStockpile) do
+            if r.raw and r.raw.Parent and Remotes.DestroyToy then
+                Remotes.DestroyToy:FireServer(r.raw)
+            end
+        end
+        RocketStockpile = {}
+
+        -- Disconnect active rockets
+        for _, r in ipairs(ActiveRockets) do
+            if r.conn then r.conn:Disconnect() end
+        end
+        ActiveRockets = {}
+
         StatusLabel:SetText("Idle")
         updateLabels()
         Notify("Welder", "Everything reset.", 2)
@@ -755,6 +781,20 @@ local function getOurParts()
             if child.part then parts[child.part] = true end
             if child.raw:IsA("Model") then
                 for _, p in ipairs(child.raw:GetDescendants()) do
+                    if p:IsA("BasePart") then parts[p] = true end
+                end
+            end
+        end
+    end
+
+    -- Rocket stockpile
+    for _, r in ipairs(RocketStockpile) do
+        if r.raw and r.raw.Parent then
+            local sp = r.raw:FindFirstChild("SoundPart", true)
+            if sp then parts[sp] = true end
+            if r.part then parts[r.part] = true end
+            if r.raw:IsA("Model") then
+                for _, p in ipairs(r.raw:GetDescendants()) do
                     if p:IsA("BasePart") then parts[p] = true end
                 end
             end
@@ -1270,7 +1310,248 @@ IORight:AddLabel({
 })
 
 -- ============================================================
--- [[ 17. UI SETTINGS (ThemeManager + SaveManager) ]]
+-- [[ 17. ROCKET SYSTEM ]]
+-- ============================================================
+
+-- Find RocketSpawn child offset (if user placed a marker in the build)
+local function getRocketSpawnOffset()
+	for _, child in ipairs(Children) do
+		if child.name and child.name:find("RocketSpawn") and child.offset then
+			return child.offset
+		end
+	end
+	return nil
+end
+
+-- Stockpile UI
+RocketLeft:AddDropdown("RocketToy", {
+	Text    = "Rocket Toy",
+	Default = 1,
+	Values  = {"NinjaShuriken", "NinjaKunai", "BaseballBat", "NinjaSword"},
+	Multi   = false,
+	Tooltip = "Which toy to use as a rocket projectile",
+})
+
+RocketLeft:AddSlider("RocketCount", {
+	Text     = "Rockets to Stockpile",
+	Default  = 5,
+	Min      = 1,
+	Max      = 20,
+	Rounding = 0,
+	Suffix   = " rockets",
+})
+
+local RocketStockLabel = RocketLeft:AddLabel("Stockpile: 0 rockets ready")
+
+RocketLeft:AddButton({
+	Text    = "Stockpile Rockets",
+	Tooltip = "Spawn + claim rockets, store in sky",
+	Func    = function()
+		task.spawn(function()
+			if stockpileInProgress then
+				Notify("Rockets", "Already stockpiling!", 2)
+				return
+			end
+			stockpileInProgress = true
+
+			local hrp = getRoot()
+			if not hrp then
+				Notify("Error", "No character!", 3)
+				stockpileInProgress = false
+				return
+			end
+
+			local toyName = Options.RocketToy and Options.RocketToy.Value or "NinjaShuriken"
+			local count = Options.RocketCount and Options.RocketCount.Value or 5
+
+			-- Build exclude set from existing stockpile
+			local excludeSet = {}
+			for _, r in ipairs(RocketStockpile) do
+				if r.raw then excludeSet[r.raw] = true end
+			end
+			-- Also exclude build parts
+			if RootPartRaw then excludeSet[RootPartRaw] = true end
+			for _, child in ipairs(Children) do
+				if child.raw then excludeSet[child.raw] = true end
+			end
+
+			Notify("Rockets", "Stockpiling " .. count .. " rockets...", 3)
+
+			local success = 0
+			for i = 1, count do
+				RocketStockLabel:SetText("Stockpiling " .. i .. "/" .. count .. "...")
+
+				local skyCF = CFrame.new(
+					hrp.Position.X + (i * ROCKET_SKY_SPREAD),
+					hrp.Position.Y + ROCKET_SKY_HEIGHT,
+					hrp.Position.Z
+				)
+
+				local bp, raw = spawnClaimAndMove(toyName, skyCF, excludeSet)
+				if bp and raw then
+					excludeSet[raw] = true
+					table.insert(RocketStockpile, { part = bp, raw = raw })
+					success += 1
+				end
+			end
+
+			RocketStockLabel:SetText("Stockpile: " .. #RocketStockpile .. " rockets ready")
+			stockpileInProgress = false
+			Notify("Rockets", "Stockpiled " .. success .. "/" .. count .. " rockets!", 3)
+		end)
+	end,
+})
+
+RocketLeft:AddButton({
+	Text    = "Clear Stockpile",
+	Tooltip = "Destroy all stockpiled rockets",
+	Func    = function()
+		for _, r in ipairs(RocketStockpile) do
+			if r.raw and r.raw.Parent and Remotes.DestroyToy then
+				Remotes.DestroyToy:FireServer(r.raw)
+			end
+		end
+		RocketStockpile = {}
+		RocketStockLabel:SetText("Stockpile: 0 rockets ready")
+		Notify("Rockets", "Stockpile cleared!", 2)
+	end,
+})
+
+-- Launch UI
+RocketRight:AddSlider("RocketSpeed", {
+	Text     = "Rocket Speed",
+	Default  = 200,
+	Min      = 50,
+	Max      = 1000,
+	Rounding = 0,
+	Suffix   = " st/s",
+	Tooltip  = "Studs per second the rocket travels",
+})
+
+RocketRight:AddSlider("RocketLifetime", {
+	Text     = "Rocket Lifetime",
+	Default  = 5,
+	Min      = 1,
+	Max      = 20,
+	Rounding = 1,
+	Suffix   = " sec",
+	Tooltip  = "How long before the rocket auto-destroys",
+})
+
+local RocketActiveLabel = RocketRight:AddLabel("Active: 0 | Stockpile: 0")
+
+RocketRight:AddDivider()
+RocketRight:AddLabel({
+	Text     = "Press C to fire a rocket!\nRockets fly from RocketSpawn\nmarker on build, or from\nplayer look direction.",
+	DoesWrap = true,
+})
+
+-- Fire rocket function
+local function fireRocket()
+	-- Remove dead rockets from stockpile first
+	for i = #RocketStockpile, 1, -1 do
+		if not RocketStockpile[i].part or not RocketStockpile[i].part.Parent then
+			table.remove(RocketStockpile, i)
+		end
+	end
+
+	if #RocketStockpile == 0 then
+		Notify("Rockets", "No rockets! Stockpile some first.", 2)
+		return
+	end
+
+	local rocket = table.remove(RocketStockpile, 1)
+	local bp = rocket.part
+	if not bp or not bp.Parent then
+		-- Try next one recursively
+		fireRocket()
+		return
+	end
+
+	-- Determine launch CFrame
+	local launchCF
+	local rocketSpawnOffset = getRocketSpawnOffset()
+
+	if weldActive and RootPart and RootPart.Parent and rocketSpawnOffset then
+		launchCF = RootPart.CFrame * rocketSpawnOffset
+	else
+		local hrp = getRoot()
+		if not hrp then return end
+		launchCF = hrp.CFrame * CFrame.new(0, 0, -3)
+	end
+
+	-- Unanchor everything in the rocket
+	if rocket.raw and rocket.raw:IsA("Model") then
+		for _, p in ipairs(rocket.raw:GetDescendants()) do
+			if p:IsA("BasePart") then
+				p.Anchored = false
+				p.AssemblyLinearVelocity = Vector3.zero
+				p.AssemblyAngularVelocity = Vector3.zero
+			end
+		end
+	else
+		bp.Anchored = false
+	end
+
+	-- Teleport to launch position
+	bp.CFrame = launchCF
+	bp.AssemblyLinearVelocity = Vector3.zero
+	bp.AssemblyAngularVelocity = Vector3.zero
+
+	local direction = launchCF.LookVector
+	local speed = Options.RocketSpeed and Options.RocketSpeed.Value or 200
+	local lifetime = Options.RocketLifetime and Options.RocketLifetime.Value or 5
+	local startTime = tick()
+
+	-- Heartbeat flight loop
+	local conn
+	conn = RunService.Heartbeat:Connect(function(dt)
+		if not bp or not bp.Parent then
+			conn:Disconnect()
+			return
+		end
+
+		bp.CFrame = bp.CFrame + direction * speed * dt
+		bp.AssemblyLinearVelocity = Vector3.new(0, 0.01, 0)
+		bp.AssemblyAngularVelocity = Vector3.zero
+
+		if tick() - startTime > lifetime then
+			conn:Disconnect()
+			if Remotes.DestroyToy and rocket.raw and rocket.raw.Parent then
+				Remotes.DestroyToy:FireServer(rocket.raw)
+			end
+		end
+	end)
+
+	table.insert(ActiveRockets, { part = bp, raw = rocket.raw, conn = conn, startTime = startTime })
+	RocketStockLabel:SetText("Stockpile: " .. #RocketStockpile .. " rockets ready")
+end
+
+-- C key to fire
+UIS.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+	if input.KeyCode == Enum.KeyCode.C then
+		fireRocket()
+	end
+end)
+
+-- Background cleanup loop for active rockets + label updates
+task.spawn(function()
+	while task.wait(1) do
+		for i = #ActiveRockets, 1, -1 do
+			local r = ActiveRockets[i]
+			if not r.part or not r.part.Parent then
+				if r.conn then r.conn:Disconnect() end
+				table.remove(ActiveRockets, i)
+			end
+		end
+		RocketActiveLabel:SetText("Active: " .. #ActiveRockets .. " | Stockpile: " .. #RocketStockpile)
+		RocketStockLabel:SetText("Stockpile: " .. #RocketStockpile .. " rockets ready")
+	end
+end)
+
+-- ============================================================
+-- [[ 18. UI SETTINGS (ThemeManager + SaveManager) ]]
 -- ============================================================
 
 ThemeManager:SetLibrary(Library)

@@ -45,3 +45,5 @@ Spawn and weld script\editor
 Spawn and weld script\editor/EditorServer.luau
 Spawn and weld script\editor/EditorClient.luau
 Spawn and weld script\editor/SETUP.txt
+research/claim_ownership.luau
+
