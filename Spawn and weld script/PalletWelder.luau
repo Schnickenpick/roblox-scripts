@@ -721,6 +721,138 @@ Left:AddButton({
 })
 
 -- ============================================================
+-- [[ 13.5. AUTO REGRAB (ANTI-STEAL) ]]
+-- ============================================================
+
+local regrabActive = false
+local regrabConn = nil
+
+-- Get all SoundParts (or bp fallbacks) from our build for quick lookup
+local function getOurParts()
+    local parts = {}
+    local toyFolder = getToyFolder()
+    if not toyFolder then return parts end
+
+    -- Root
+    if RootPartRaw and RootPartRaw.Parent then
+        local sp = RootPartRaw:FindFirstChild("SoundPart", true)
+        if sp then parts[sp] = true end
+        local bp = getPartFromToy(RootPartRaw)
+        if bp then parts[bp] = true end
+        -- Add all BaseParts in the model
+        if RootPartRaw:IsA("Model") then
+            for _, p in ipairs(RootPartRaw:GetDescendants()) do
+                if p:IsA("BasePart") then parts[p] = true end
+            end
+        end
+    end
+
+    -- Children
+    for _, child in ipairs(Children) do
+        if child.raw and child.raw.Parent then
+            local sp = child.raw:FindFirstChild("SoundPart", true)
+            if sp then parts[sp] = true end
+            if child.part then parts[child.part] = true end
+            if child.raw:IsA("Model") then
+                for _, p in ipairs(child.raw:GetDescendants()) do
+                    if p:IsA("BasePart") then parts[p] = true end
+                end
+            end
+        end
+    end
+
+    return parts
+end
+
+local function startRegrab()
+    if regrabConn then return end
+    regrabActive = true
+
+    local grabRemote = Remotes.CreateGrabLine
+    if not grabRemote then
+        warn("[Regrab] CreateGrabLine remote not found!")
+        return
+    end
+
+    regrabConn = grabRemote.OnClientEvent:Connect(function(player, grabbedPart, grabCFrame)
+        -- Ignore our own grabs
+        if player == LP then return end
+        if not regrabActive then return end
+
+        -- Check if the grabbed part belongs to our build
+        local ourParts = getOurParts()
+        if not ourParts[grabbedPart] then return end
+
+        -- Someone grabbed one of our parts! Reclaim it.
+        local hrp = getRoot()
+        if not hrp then return end
+
+        -- Find the SoundPart of the toy that owns this part
+        local toyRaw = grabbedPart
+        -- Walk up to find the toy model in our folder
+        local toyFolder = getToyFolder()
+        if toyFolder then
+            local current = grabbedPart
+            for _ = 1, 5 do
+                if current.Parent == toyFolder then
+                    toyRaw = current
+                    break
+                end
+                current = current.Parent
+                if not current then break end
+            end
+        end
+
+        local soundPart = nil
+        if toyRaw:IsA("Model") then
+            soundPart = toyRaw:FindFirstChild("SoundPart", true)
+        end
+        local netPart = soundPart or grabbedPart
+
+        warn("[Regrab] " .. player.Name .. " grabbed our " .. grabbedPart.Name .. " — reclaiming!")
+        Notify("Anti-Steal", player.Name .. " grabbed your build! Reclaiming...", 3)
+
+        -- Immediately reclaim
+        if Remotes.SetNetworkOwner then
+            Remotes.SetNetworkOwner:FireServer(netPart, hrp.CFrame)
+        end
+        task.wait(0.1)
+        if Remotes.CreateGrabLine and Remotes.DestroyGrabLine then
+            Remotes.CreateGrabLine:FireServer(netPart, hrp.CFrame)
+            task.wait(0.15)
+            Remotes.DestroyGrabLine:FireServer(netPart)
+        end
+    end)
+
+    warn("[Regrab] Anti-steal active — listening for grabs on our parts")
+end
+
+local function stopRegrab()
+    regrabActive = false
+    if regrabConn then
+        regrabConn:Disconnect()
+        regrabConn = nil
+    end
+end
+
+Left:AddToggle("AutoRegrab", {
+    Text    = "Anti-Steal (Auto Regrab)",
+    Default = false,
+    Tooltip = "Detects when someone grabs your build and automatically reclaims it",
+    Callback = function(v)
+        if v then
+            startRegrab()
+            Notify("Anti-Steal", "Active! Will reclaim if someone grabs your build.", 3)
+        else
+            stopRegrab()
+            Notify("Anti-Steal", "Disabled.", 2)
+        end
+    end,
+})
+
+Left:AddDivider()
+
+-- ============================================================
 -- [[ 14. PLAYER TOYS TAB ]]
 -- ============================================================
 
