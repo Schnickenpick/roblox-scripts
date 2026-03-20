@@ -86,6 +86,11 @@ task.spawn(function()
         Remotes.SpawnToy   = MT:FindFirstChild("SpawnToyRemoteFunction")
         Remotes.DestroyToy = MT:FindFirstChild("DestroyToy")
     end
+    local BE = RS:WaitForChild("BombEvents", 10)
+    if BE then
+        Remotes.BombExplode    = BE:FindFirstChild("BombExplode")
+        Remotes.BombReplicator = BE:FindFirstChild("BombReplicator")
+    end
 end)
 
 -- ============================================================
@@ -1327,9 +1332,9 @@ end
 RocketLeft:AddDropdown("RocketToy", {
 	Text    = "Rocket Toy",
 	Default = 1,
-	Values  = {"NinjaShuriken", "NinjaKunai", "BaseballBat", "NinjaSword"},
+	Values  = {"BombMissile", "NinjaShuriken", "NinjaKunai", "BaseballBat", "NinjaSword"},
 	Multi   = false,
-	Tooltip = "Which toy to use as a rocket projectile",
+	Tooltip = "Which toy to use as a rocket projectile (BombMissile explodes on impact!)",
 })
 
 RocketLeft:AddSlider("RocketCount", {
@@ -1438,13 +1443,52 @@ RocketRight:AddSlider("RocketLifetime", {
 	Tooltip  = "How long before the rocket auto-destroys",
 })
 
+RocketRight:AddToggle("RocketExplode", {
+	Text    = "Explode on Impact",
+	Default = true,
+	Tooltip = "BombMissile rockets explode when they hit something (Touched event)",
+})
+
 local RocketActiveLabel = RocketRight:AddLabel("Active: 0 | Stockpile: 0")
 
 RocketRight:AddDivider()
 RocketRight:AddLabel({
-	Text     = "Press C to fire a rocket!\nRockets fly from RocketSpawn\nmarker on build, or from\nplayer look direction.",
+	Text     = "Press C to fire a rocket!\nRockets fly from RocketSpawn\nmarker on build, or from\nplayer look direction.\nBombMissile = explodes on hit!",
 	DoesWrap = true,
 })
+
+-- Trigger BombMissile explosion via game events
+local function explodeRocket(rocketRaw, position)
+	if not rocketRaw or not rocketRaw.Parent then return end
+
+	-- Find bomb parts inside the model
+	local hitbox = rocketRaw:FindFirstChild("PartHitDetector", true)
+	local body = rocketRaw:FindFirstChild("Body", true)
+
+	local explodeData = {
+		Radius = 17.5,
+		TimeLength = 0.5,
+		ExplodedOnce = false,
+		Model = rocketRaw,
+		ExplodesByFire = true,
+		ImpactSpeed = 100,
+		Hitbox = hitbox,
+		DestroysModel = true,
+		ExplodesByPointy = false,
+		MaxForcePerStudSquared = 225,
+		PositionPart = body,
+	}
+
+	-- Fire BombExplode (visual explosion for all clients)
+	if Remotes.BombExplode then
+		firesignal(Remotes.BombExplode.OnClientEvent, explodeData, position)
+	end
+
+	-- Fire BombReplicator (replicates to other clients)
+	if Remotes.BombReplicator then
+		firesignal(Remotes.BombReplicator.OnClientEvent, explodeData)
+	end
+end
 
 -- Fire rocket function
 local function fireRocket()
@@ -1502,12 +1546,42 @@ local function fireRocket()
 	local speed = Options.RocketSpeed and Options.RocketSpeed.Value or 200
 	local lifetime = Options.RocketLifetime and Options.RocketLifetime.Value or 5
 	local startTime = tick()
+	local exploded = false
+
+	-- Touched-based explosion for BombMissile
+	local touchConn = nil
+	local isBomb = rocket.raw and rocket.raw.Name == "BombMissile"
+	local shouldExplode = Toggles.RocketExplode and Toggles.RocketExplode.Value
+
+	if isBomb and shouldExplode then
+		-- Connect Touched on all BaseParts in the rocket
+		local function onTouched(hit)
+			if exploded then return end
+			-- Ignore touches with our own build parts or other rockets
+			if hit:IsDescendantOf(rocket.raw) then return end
+			-- Ignore our own character
+			local char = LP.Character
+			if char and hit:IsDescendantOf(char) then return end
+
+			exploded = true
+			if touchConn then touchConn:Disconnect() end
+
+			explodeRocket(rocket.raw, bp.Position)
+		end
+
+		-- Find the main collidable part (Body or bp)
+		local touchPart = rocket.raw:FindFirstChild("Body", true) or bp
+		if touchPart and touchPart:IsA("BasePart") then
+			touchConn = touchPart.Touched:Connect(onTouched)
+		end
+	end
 
 	-- Heartbeat flight loop
 	local conn
 	conn = RunService.Heartbeat:Connect(function(dt)
-		if not bp or not bp.Parent then
+		if exploded or not bp or not bp.Parent then
 			conn:Disconnect()
+			if touchConn then touchConn:Disconnect() end
 			return
 		end
 
@@ -1517,7 +1591,12 @@ local function fireRocket()
 
 		if tick() - startTime > lifetime then
 			conn:Disconnect()
-			if Remotes.DestroyToy and rocket.raw and rocket.raw.Parent then
+			if touchConn then touchConn:Disconnect() end
+			-- Explode on timeout too if it's a bomb
+			if isBomb and shouldExplode and not exploded then
+				exploded = true
+				explodeRocket(rocket.raw, bp.Position)
+			elseif Remotes.DestroyToy and rocket.raw and rocket.raw.Parent then
 				Remotes.DestroyToy:FireServer(rocket.raw)
 			end
 		end
