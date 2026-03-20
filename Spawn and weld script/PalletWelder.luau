@@ -669,6 +669,17 @@ local function startWeld()
                 child.part.CFrame = rootCF * child.offset
                 child.part.AssemblyLinearVelocity = Vector3.new(0, 0.01, 0)
                 child.part.AssemblyAngularVelocity = Vector3.zero
+
+                -- Hide RocketSpawn marker during weld
+                if child.name and child.name:find("RocketSpawn") then
+                    child.part.Transparency = 1
+                    if child.raw and child.raw:IsA("Model") then
+                        for _, p in ipairs(child.raw:GetDescendants()) do
+                            if p:IsA("BasePart") then p.Transparency = 1 end
+                            if p:IsA("Decal") then p.Transparency = 1 end
+                        end
+                    end
+                end
             end
         end
     end)
@@ -857,16 +868,22 @@ local function startRegrab()
         warn("[Regrab] " .. player.Name .. " grabbed our " .. grabbedPart.Name .. " — reclaiming!")
         Notify("Anti-Steal", player.Name .. " grabbed your build! Reclaiming...", 3)
 
-        -- Immediately reclaim
-        if Remotes.SetNetworkOwner then
-            Remotes.SetNetworkOwner:FireServer(netPart, hrp.CFrame)
-        end
-        task.wait(0.1)
-        if Remotes.CreateGrabLine and Remotes.DestroyGrabLine then
-            Remotes.CreateGrabLine:FireServer(netPart, hrp.CFrame)
-            task.wait(0.15)
-            Remotes.DestroyGrabLine:FireServer(netPart)
-        end
+        -- Reclaim with 3 retries
+        task.spawn(function()
+            for attempt = 1, 3 do
+                if Remotes.SetNetworkOwner then
+                    Remotes.SetNetworkOwner:FireServer(netPart, hrp.CFrame)
+                end
+                task.wait(0.1)
+                if Remotes.CreateGrabLine and Remotes.DestroyGrabLine then
+                    Remotes.CreateGrabLine:FireServer(netPart, hrp.CFrame)
+                    task.wait(0.15)
+                    Remotes.DestroyGrabLine:FireServer(netPart)
+                end
+                if attempt < 3 then task.wait(0.2) end
+            end
+            warn("[Regrab] Reclaim done (3 attempts) for " .. grabbedPart.Name)
+        end)
     end)
 
     warn("[Regrab] Anti-steal active — listening for grabs on our parts")
@@ -1124,7 +1141,8 @@ IOLeft:AddButton({
         local childrenStr = {}
         local count = 0
         for _, child in ipairs(Children) do
-            if child.part and child.part.Parent then
+            -- Include virtual markers (RocketSpawn) even though they have no part
+            if (child.part and child.part.Parent) or (child.name == "RocketSpawn") then
                 local arr = cfToArray(child.offset)
                 local offsetStr = "[" .. table.concat(arr, ",") .. "]"
                 local toyName = (child.name or "Unknown"):gsub('"', '\\"')
@@ -1256,9 +1274,23 @@ IORight:AddButton({
             local failed = 0
 
             for i, entry in ipairs(data.children) do
+                local offset = arrayToCf(entry.offset)
+
+                -- RocketSpawn is an editor-only marker — don't spawn, just store offset
+                if entry.toy == "RocketSpawn" then
+                    table.insert(Children, {
+                        part   = nil,
+                        raw    = nil,
+                        offset = offset,
+                        name   = "RocketSpawn",
+                    })
+                    warn("[Import] RocketSpawn marker stored (virtual, no spawn)")
+                    spawned += 1
+                    continue
+                end
+
                 ImportStatusLabel:SetText("Spawning #" .. i .. "/" .. #data.children .. " (" .. (entry.toy or "?") .. ")")
 
-                local offset = arrayToCf(entry.offset)
                 -- Target position in sky (relative to root)
                 local targetCF = rootBP.CFrame * offset
 
@@ -1318,11 +1350,12 @@ IORight:AddLabel({
 -- [[ 17. ROCKET SYSTEM ]]
 -- ============================================================
 
--- Find RocketSpawn child offset (if user placed a marker in the build)
-local function getRocketSpawnOffset()
+-- Find RocketSpawn child (if user placed a marker in the build)
+-- Returns the child entry { part, raw, offset, name } or nil
+local function getRocketSpawnChild()
 	for _, child in ipairs(Children) do
 		if child.name and child.name:find("RocketSpawn") and child.offset then
-			return child.offset
+			return child
 		end
 	end
 	return nil
@@ -1512,12 +1545,13 @@ local function fireRocket()
 		return
 	end
 
-	-- Determine launch CFrame
+	-- Determine launch CFrame (position + direction)
 	local launchCF
-	local rocketSpawnOffset = getRocketSpawnOffset()
+	local spawnChild = getRocketSpawnChild()
 
-	if weldActive and RootPart and RootPart.Parent and rocketSpawnOffset then
-		launchCF = RootPart.CFrame * rocketSpawnOffset
+	if weldActive and RootPart and RootPart.Parent and spawnChild then
+		-- Use the marker's world CFrame — its LookVector (front face / decal direction) is the fire direction
+		launchCF = RootPart.CFrame * spawnChild.offset
 	else
 		local hrp = getRoot()
 		if not hrp then return end
