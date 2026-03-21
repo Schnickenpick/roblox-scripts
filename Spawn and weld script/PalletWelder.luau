@@ -336,6 +336,9 @@ local ROCKET_SKY_SPREAD = 5
 -- Button system: cooldown tracking per child (child -> last trigger tick)
 local ButtonCooldowns = {}
 
+-- Forward declarations (defined later, referenced in anti-steal listener)
+local fireRocket
+
 -- ============================================================
 -- [[ 7. HIGHLIGHT SYSTEM ]]
 -- ============================================================
@@ -1552,7 +1555,7 @@ local function explodeRocket(rocketRaw, position)
 end
 
 -- Fire rocket function
-local function fireRocket()
+fireRocket = function()
 	-- Remove dead rockets from stockpile first
 	for i = #RocketStockpile, 1, -1 do
 		if not RocketStockpile[i].part or not RocketStockpile[i].part.Parent then
