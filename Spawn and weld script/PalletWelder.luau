@@ -77,8 +77,7 @@ local Remotes = {}
 task.spawn(function()
     local GE = RS:WaitForChild("GrabEvents", 10)
     if GE then
-        Remotes.CreateGrabLine   = GE:FindFirstChild("CreateGrabLine")
-        Remotes.DestroyGrabLine  = GE:FindFirstChild("DestroyGrabLine")
+        Remotes.CreateGrabLine   = GE:FindFirstChild("CreateGrabLine")  -- for anti-steal detection only
         Remotes.SetNetworkOwner  = GE:FindFirstChild("SetNetworkOwner")
     end
     local MT = RS:WaitForChild("MenuToys", 10)
@@ -255,15 +254,7 @@ local function spawnClaimAndMove(toyName, targetCF, excludeSet)
         -- SetNetworkOwner: SoundPart (or bp fallback), player's HRP CFrame
         if Remotes.SetNetworkOwner then
             Remotes.SetNetworkOwner:FireServer(netPart, hrp.CFrame)
-            task.wait(0.15)
-        end
-
-        -- CreateGrabLine: SoundPart (or bp fallback), player's HRP CFrame
-        if Remotes.CreateGrabLine and Remotes.DestroyGrabLine then
-            Remotes.CreateGrabLine:FireServer(netPart, hrp.CFrame)
-            task.wait(0.2)
-            Remotes.DestroyGrabLine:FireServer(netPart)
-            task.wait(0.15)
+            task.wait(0.3)
         end
 
         -- Verify: try moving the part and see if it sticks
@@ -341,6 +332,9 @@ local ActiveRockets = {}      -- { part = BasePart, raw = rawToyEntry, conn = RB
 local stockpileInProgress = false
 local ROCKET_SKY_HEIGHT = 1000
 local ROCKET_SKY_SPREAD = 5
+
+-- Button system: cooldown tracking per child (child -> last trigger tick)
+local ButtonCooldowns = {}
 
 -- ============================================================
 -- [[ 7. HIGHLIGHT SYSTEM ]]
@@ -865,24 +859,52 @@ local function startRegrab()
         end
         local netPart = soundPart or grabbedPart
 
-        warn("[Regrab] " .. player.Name .. " grabbed our " .. grabbedPart.Name .. " — reclaiming!")
-        Notify("Anti-Steal", player.Name .. " grabbed your build! Reclaiming...", 3)
+        -- Check if this is a button (child with a tag)
+        local buttonChild = nil
+        for _, child in ipairs(Children) do
+            if child.tag and child.raw and child.raw == toyRaw then
+                buttonChild = child
+                break
+            end
+        end
 
-        -- Reclaim with 3 retries
+        if buttonChild then
+            -- Button press detected! Check cooldown
+            local cooldown = Options.ButtonCooldown and Options.ButtonCooldown.Value or 1
+            local lastPress = ButtonCooldowns[buttonChild] or 0
+            if tick() - lastPress < cooldown then
+                warn("[Button] Cooldown active for " .. buttonChild.tag)
+            else
+                ButtonCooldowns[buttonChild] = tick()
+                warn("[Button] " .. player.Name .. " pressed button: " .. buttonChild.tag)
+                Notify("Button", player.Name .. " pressed " .. buttonChild.tag .. "!", 2)
+
+                -- Dispatch action based on tag
+                if buttonChild.tag == "Rocket" then
+                    task.spawn(fireRocket)
+                elseif buttonChild.tag == "Explode" then
+                    -- Explode at button world position
+                    local btnPos = RootPart and RootPart.CFrame * buttonChild.offset
+                    if btnPos then
+                        -- Create a small explosion effect at the button
+                        Notify("Button", "Boom!", 1)
+                    end
+                end
+                -- More tags can be added here later (animations, horn, etc.)
+            end
+        else
+            warn("[Regrab] " .. player.Name .. " grabbed our " .. grabbedPart.Name .. " — reclaiming!")
+            Notify("Anti-Steal", player.Name .. " grabbed your build! Reclaiming...", 3)
+        end
+
+        -- Always reclaim regardless of button or not
         task.spawn(function()
             for attempt = 1, 3 do
                 if Remotes.SetNetworkOwner then
                     Remotes.SetNetworkOwner:FireServer(netPart, hrp.CFrame)
                 end
-                task.wait(0.1)
-                if Remotes.CreateGrabLine and Remotes.DestroyGrabLine then
-                    Remotes.CreateGrabLine:FireServer(netPart, hrp.CFrame)
-                    task.wait(0.15)
-                    Remotes.DestroyGrabLine:FireServer(netPart)
-                end
-                if attempt < 3 then task.wait(0.2) end
+                if attempt < 3 then task.wait(0.3) end
             end
-            warn("[Regrab] Reclaim done (3 attempts) for " .. grabbedPart.Name)
         end)
     end)
 
@@ -1146,7 +1168,12 @@ IOLeft:AddButton({
                 local arr = cfToArray(child.offset)
                 local offsetStr = "[" .. table.concat(arr, ",") .. "]"
                 local toyName = (child.name or "Unknown"):gsub('"', '\\"')
-                table.insert(childrenStr, '{"toy":"' .. toyName .. '","offset":' .. offsetStr .. '}')
+                local entry = '{"toy":"' .. toyName .. '","offset":' .. offsetStr
+                if child.tag then
+                    entry = entry .. ',"tag":"' .. tostring(child.tag):gsub('"', '\\"') .. '"'
+                end
+                entry = entry .. '}'
+                table.insert(childrenStr, entry)
                 count += 1
             end
         end
@@ -1304,6 +1331,7 @@ IORight:AddButton({
                         raw    = raw,
                         offset = offset,
                         name   = entry.toy,
+                        tag    = entry.tag,  -- button/marker tag (e.g. "Rocket")
                     })
                     spawned += 1
                 else
@@ -1664,7 +1692,32 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- [[ 18. UI SETTINGS (ThemeManager + SaveManager) ]]
+-- [[ 18. BUTTON SYSTEM UI ]]
+-- ============================================================
+
+RocketRight:AddDivider()
+RocketRight:AddLabel({
+	Text     = "--- Buttons ---",
+	DoesWrap = false,
+})
+
+RocketRight:AddSlider("ButtonCooldown", {
+	Text     = "Button Cooldown",
+	Default  = 1,
+	Min      = 0.2,
+	Max      = 5,
+	Rounding = 1,
+	Suffix   = " sec",
+	Tooltip  = "Cooldown between button presses (per button)",
+})
+
+RocketRight:AddLabel({
+	Text     = "Buttons use BellSmall toys.\nAdd tag in JSON to link:\n  tag: Rocket = fire rocket\n  tag: Explode = boom\nAnyone grabbing the bell\ntriggers the action!",
+	DoesWrap = true,
+})
+
+-- ============================================================
+-- [[ 19. UI SETTINGS (ThemeManager + SaveManager) ]]
 -- ============================================================
 
 ThemeManager:SetLibrary(Library)
