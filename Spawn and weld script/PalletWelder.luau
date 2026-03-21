@@ -336,6 +336,9 @@ local ROCKET_SKY_SPREAD = 5
 -- Button system: cooldown tracking per child (child -> last trigger tick)
 local ButtonCooldowns = {}
 
+-- Follow link system: { [groupName] = { player = Player, buttonChild = childEntry } }
+local ActiveFollowLinks = {}
+
 -- Forward declarations (defined later, referenced in anti-steal listener)
 local fireRocket
 
@@ -661,9 +664,37 @@ local function startWeld()
 
         local rootCF = RootPart.CFrame
 
+        -- Pre-compute follow group pivots and head rotations
+        local followPivots = {}  -- { [groupName] = { headRot = CFrame, pivotOffset = CFrame } }
+        for groupName, link in pairs(ActiveFollowLinks) do
+            local plr = link.player
+            local char = plr and plr.Character
+            local head = char and char:FindFirstChild("Head")
+            if head and link.buttonChild and link.buttonChild.offset then
+                -- Head rotation only (strip position)
+                local headRot = head.CFrame - head.CFrame.Position
+                followPivots[groupName] = {
+                    headRot = headRot,
+                    pivotOffset = link.buttonChild.offset,
+                }
+            end
+        end
+
         for _, child in ipairs(Children) do
             if child.part and child.part.Parent and not child.part.Anchored then
-                child.part.CFrame = rootCF * child.offset
+                -- Check if this child is in an active follow group
+                local followData = child.followGroup and followPivots[child.followGroup]
+
+                if followData then
+                    -- Follow mode: rotate around the button pivot using the player's head rotation
+                    local pivotWorld = rootCF * followData.pivotOffset
+                    local localOffset = followData.pivotOffset:Inverse() * child.offset
+                    child.part.CFrame = pivotWorld * followData.headRot * localOffset
+                else
+                    -- Normal weld
+                    child.part.CFrame = rootCF * child.offset
+                end
+
                 child.part.AssemblyLinearVelocity = Vector3.new(0, 0.01, 0)
                 child.part.AssemblyAngularVelocity = Vector3.zero
 
@@ -752,6 +783,9 @@ Left:AddButton({
             if r.conn then r.conn:Disconnect() end
         end
         ActiveRockets = {}
+
+        -- Clear follow links
+        ActiveFollowLinks = {}
 
         StatusLabel:SetText("Idle")
         updateLabels()
@@ -886,14 +920,33 @@ local function startRegrab()
                 if buttonChild.tag == "Rocket" then
                     task.spawn(fireRocket)
                 elseif buttonChild.tag == "Explode" then
-                    -- Explode at button world position
                     local btnPos = RootPart and RootPart.CFrame * buttonChild.offset
                     if btnPos then
-                        -- Create a small explosion effect at the button
                         Notify("Button", "Boom!", 1)
                     end
+                elseif buttonChild.tag == "Follow" then
+                    local groupName = buttonChild.followGroup
+                    if groupName then
+                        local existing = ActiveFollowLinks[groupName]
+                        if existing and existing.player == player then
+                            -- Same player pressed again → deactivate
+                            ActiveFollowLinks[groupName] = nil
+                            warn("[Follow] " .. player.Name .. " released " .. groupName)
+                            Notify("Follow", player.Name .. " released " .. groupName, 2)
+                        else
+                            -- New player or first activation → activate/overwrite
+                            ActiveFollowLinks[groupName] = {
+                                player = player,
+                                buttonChild = buttonChild,
+                            }
+                            warn("[Follow] " .. player.Name .. " now controls " .. groupName)
+                            Notify("Follow", player.Name .. " controls " .. groupName .. "!", 2)
+                        end
+                    else
+                        warn("[Follow] Button has Follow tag but no followGroup!")
+                        Notify("Button", "Follow button needs a followGroup!", 3)
+                    end
                 end
-                -- More tags can be added here later (animations, horn, etc.)
             end
         else
             warn("[Regrab] " .. player.Name .. " grabbed our " .. grabbedPart.Name .. " — reclaiming!")
@@ -969,9 +1022,17 @@ StealLeft:AddDropdown("TargetPlayer", {
 Players.PlayerAdded:Connect(function()
     Options.TargetPlayer:SetValues(getPlayerList())
 end)
-Players.PlayerRemoving:Connect(function()
+Players.PlayerRemoving:Connect(function(leavingPlayer)
     task.wait(0.1)
     Options.TargetPlayer:SetValues(getPlayerList())
+
+    -- Auto-release follow links for the leaving player
+    for groupName, link in pairs(ActiveFollowLinks) do
+        if link.player == leavingPlayer then
+            ActiveFollowLinks[groupName] = nil
+            warn("[Follow] " .. leavingPlayer.Name .. " left — released " .. groupName)
+        end
+    end
 end)
 
 StealLeft:AddButton({
@@ -1175,6 +1236,9 @@ IOLeft:AddButton({
                 if child.tag then
                     entry = entry .. ',"tag":"' .. tostring(child.tag):gsub('"', '\\"') .. '"'
                 end
+                if child.followGroup then
+                    entry = entry .. ',"followGroup":"' .. tostring(child.followGroup):gsub('"', '\\"') .. '"'
+                end
                 entry = entry .. '}'
                 table.insert(childrenStr, entry)
                 count += 1
@@ -1309,10 +1373,11 @@ IORight:AddButton({
                 -- RocketSpawn is an editor-only marker — don't spawn, just store offset
                 if entry.toy == "RocketSpawn" then
                     table.insert(Children, {
-                        part   = nil,
-                        raw    = nil,
-                        offset = offset,
-                        name   = "RocketSpawn",
+                        part       = nil,
+                        raw        = nil,
+                        offset     = offset,
+                        name       = "RocketSpawn",
+                        followGroup = entry.followGroup,
                     })
                     warn("[Import] RocketSpawn marker stored (virtual, no spawn)")
                     spawned += 1
@@ -1330,11 +1395,12 @@ IORight:AddButton({
                     if raw then excludeSet[raw] = true end
 
                     table.insert(Children, {
-                        part   = bp,
-                        raw    = raw,
-                        offset = offset,
-                        name   = entry.toy,
-                        tag    = entry.tag,  -- button/marker tag (e.g. "Rocket")
+                        part        = bp,
+                        raw         = raw,
+                        offset      = offset,
+                        name        = entry.toy,
+                        tag         = entry.tag,
+                        followGroup = entry.followGroup,
                     })
                     spawned += 1
                 else
