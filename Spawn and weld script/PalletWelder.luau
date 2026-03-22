@@ -1758,8 +1758,8 @@ fireRocket = function()
 		bp.Anchored = false
 	end
 
-	-- Teleport to launch position
-	bp.CFrame = launchCF
+	-- Teleport to launch position, tilted 90° forward (nose points in flight direction)
+	bp.CFrame = launchCF * CFrame.Angles(math.rad(-90), 0, 0)
 	bp.AssemblyLinearVelocity = Vector3.zero
 	bp.AssemblyAngularVelocity = Vector3.zero
 
@@ -1806,7 +1806,7 @@ fireRocket = function()
 			return
 		end
 
-		bp.CFrame = bp.CFrame + direction * speed * dt
+		bp.CFrame = CFrame.lookAt(bp.Position + direction * speed * dt, bp.Position + direction * speed * dt + direction) * CFrame.Angles(math.rad(-90), 0, 0)
 		bp.AssemblyLinearVelocity = Vector3.new(0, 0.01, 0)
 		bp.AssemblyAngularVelocity = Vector3.zero
 
@@ -1814,9 +1814,17 @@ fireRocket = function()
 			conn:Disconnect()
 			if touchConn then touchConn:Disconnect() end
 			exploded = true
-			-- Lifetime expired — just destroy the rocket
-			if Remotes.DestroyToy and rocket.raw and rocket.raw.Parent then
-				Remotes.DestroyToy:FireServer(rocket.raw)
+			-- Lifetime expired — point nose straight down, unanchor, let it fall and explode on impact
+			if bp and bp.Parent then
+				bp.CFrame = CFrame.lookAt(bp.Position, bp.Position + Vector3.new(0, -1, 0)) * CFrame.Angles(math.rad(-90), 0, 0)
+				if rocket.raw and rocket.raw:IsA("Model") then
+					for _, p in ipairs(rocket.raw:GetDescendants()) do
+						if p:IsA("BasePart") then
+							p.Anchored = false
+						end
+					end
+				end
+				bp.AssemblyLinearVelocity = Vector3.new(0, -300, 0)
 			end
 		end
 	end)
