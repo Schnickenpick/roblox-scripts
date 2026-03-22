@@ -232,13 +232,14 @@ local function spawnClaimAndMove(toyName, targetCF, excludeSet)
     local bp = getPartFromToy(found)
     if not bp then return nil, nil end
 
-    -- Find SoundPart — this is what the game uses for SetNetworkOwner
-    local soundPart = nil
+    -- Find the part the game uses for SetNetworkOwner
+    -- HitboxBodyTop for rockets (BombMissile etc.), SoundPart for normal toys
+    local netPart = bp
     if found:IsA("Model") then
-        soundPart = found:FindFirstChild("SoundPart", true)
+        local hitbox = found:FindFirstChild("HitboxBodyTop", true)
+        local soundPart = found:FindFirstChild("SoundPart", true)
+        netPart = hitbox or soundPart or bp
     end
-    -- Fallback to bp if no SoundPart (e.g. for simple BasePart toys)
-    local netPart = soundPart or bp
 
     warn("[Import] Toy: " .. toyName .. " | SoundPart: " .. tostring(soundPart ~= nil) .. " | NetPart: " .. netPart.Name)
 
@@ -256,6 +257,7 @@ local function spawnClaimAndMove(toyName, targetCF, excludeSet)
             Remotes.SetNetworkOwner:FireServer(netPart, hrp.CFrame)
             task.wait(0.3)
         end
+
 
         -- Verify: try moving the part and see if it sticks
         local testCF = bp.CFrame * CFrame.new(0, 1, 0)
