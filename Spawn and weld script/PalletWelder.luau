@@ -672,24 +672,29 @@ local function startWeld()
             end
         end
 
-        -- Pre-compute follow group delta rotations (gimbal-lock-safe decomposition)
+        -- Pre-compute follow group delta rotations (gimbal-lock-safe, root-local space)
+        local rootRotInv = (rootCF - rootCF.Position):Inverse()  -- root rotation inverse
         local followPivots = {}  -- { [groupName] = { deltaRot = CFrame, pivotOffset = CFrame } }
         for groupName, link in pairs(ActiveFollowLinks) do
             local plr = link.player
             local char = plr and plr.Character
             local head = char and char:FindFirstChild("Head")
             if head and link.buttonChild and link.buttonChild.offset then
-                -- Extract yaw and pitch from current head
-                local curLook = head.CFrame.LookVector
-                local curYaw = math.atan2(-curLook.X, -curLook.Z)
-                local curPitch = math.asin(math.clamp(curLook.Y, -1, 1))
+                -- Transform head look into root-local space so delta matches child offsets
+                local curLookWorld = head.CFrame.LookVector
+                local curLookLocal = rootRotInv * curLookWorld
+                local curYaw = math.atan2(-curLookLocal.X, -curLookLocal.Z)
+                local curPitch = math.asin(math.clamp(curLookLocal.Y, -1, 1))
 
-                -- Extract yaw and pitch from base (captured at activation)
-                local baseLook = (link.baseHeadRot or CFrame.identity).LookVector
-                local baseYaw = math.atan2(-baseLook.X, -baseLook.Z)
-                local basePitch = math.asin(math.clamp(baseLook.Y, -1, 1))
+                -- Base look also needs root-local transform
+                -- But base was captured when root was in a different orientation,
+                -- so we store the world-space base and transform it with CURRENT root
+                local baseLookWorld = (link.baseHeadRot or CFrame.identity).LookVector
+                local baseLookLocal = rootRotInv * baseLookWorld
+                local baseYaw = math.atan2(-baseLookLocal.X, -baseLookLocal.Z)
+                local basePitch = math.asin(math.clamp(baseLookLocal.Y, -1, 1))
 
-                -- Delta angles
+                -- Delta angles in root-local space
                 local dYaw = curYaw - baseYaw
                 local dPitch = curPitch - basePitch
 
