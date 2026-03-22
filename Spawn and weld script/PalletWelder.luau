@@ -1701,14 +1701,56 @@ fireRocket = function()
 	local spawnChild = getRocketSpawnChild()
 
 	if weldActive and RootPart and RootPart.Parent and spawnChild then
-		-- Spawn at marker position, but fire in the player's look direction
-		local spawnPos = (RootPart.CFrame * spawnChild.offset).Position
+		-- Compute RocketSpawn's actual world position (accounting for follow rotation)
+		local rootCF = RootPart.CFrame
+		local spawnWorldCF = rootCF * spawnChild.offset  -- default: static
+
+		-- If RocketSpawn is in an active follow group, apply the same rotation as weld loop
+		if spawnChild.followGroup and ActiveFollowLinks[spawnChild.followGroup] then
+			local link = ActiveFollowLinks[spawnChild.followGroup]
+			local plr = link.player
+			local char = plr and plr.Character
+			local head = char and char:FindFirstChild("Head")
+			if head and link.buttonChild and link.buttonChild.offset then
+				local rootRotInv = (rootCF - rootCF.Position):Inverse()
+				local curLookLocal = rootRotInv * head.CFrame.LookVector
+				local curYaw = math.atan2(-curLookLocal.X, -curLookLocal.Z)
+				local curPitch = math.asin(math.clamp(curLookLocal.Y, -1, 1))
+				local baseLookLocal = rootRotInv * (link.baseHeadRot or CFrame.identity).LookVector
+				local baseYaw = math.atan2(-baseLookLocal.X, -baseLookLocal.Z)
+				local basePitch = math.asin(math.clamp(baseLookLocal.Y, -1, 1))
+				local dYaw = curYaw - baseYaw
+				local dPitch = curPitch - basePitch
+				local mode = link.followMode or "Both"
+				local deltaRot
+				if mode == "Yaw" then
+					deltaRot = CFrame.Angles(0, dYaw, 0)
+				elseif mode == "Pitch" then
+					deltaRot = CFrame.Angles(dPitch, 0, 0)
+				else
+					deltaRot = CFrame.Angles(0, dYaw, 0) * CFrame.Angles(dPitch, 0, 0)
+				end
+				-- Find pivot (PivotPoint override or button offset)
+				local pivotOffset = link.buttonChild.offset
+				for _, child in ipairs(Children) do
+					if child.name == "PivotPoint" and child.followGroup == spawnChild.followGroup and child.offset then
+						pivotOffset = child.offset
+						break
+					end
+				end
+				local pivotWorld = rootCF * pivotOffset
+				local localOffset = pivotOffset:Inverse() * spawnChild.offset
+				spawnWorldCF = pivotWorld * deltaRot * localOffset
+			end
+		end
+
+		local spawnPos = spawnWorldCF.Position
 		local head = LP.Character and LP.Character:FindFirstChild("Head")
 		if head then
 			local lookDir = head.CFrame.LookVector
 			launchCF = CFrame.lookAt(spawnPos, spawnPos + lookDir)
 		else
-			launchCF = RootPart.CFrame * spawnChild.offset
+			launchCF = spawnWorldCF
 		end
 	else
 		local hrp = getRoot()
