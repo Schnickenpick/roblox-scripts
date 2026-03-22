@@ -1745,9 +1745,19 @@ fireRocket = function()
 		end
 
 		local spawnPos = spawnWorldCF.Position
-		local head = LP.Character and LP.Character:FindFirstChild("Head")
-		if head then
-			local lookDir = head.CFrame.LookVector
+		-- Use the controlling player's look direction (not ours)
+		local aimHead = nil
+		if spawnChild.followGroup and ActiveFollowLinks[spawnChild.followGroup] then
+			local link = ActiveFollowLinks[spawnChild.followGroup]
+			local char = link.player and link.player.Character
+			aimHead = char and char:FindFirstChild("Head")
+		end
+		-- Fallback to our own head if no controller
+		if not aimHead then
+			aimHead = LP.Character and LP.Character:FindFirstChild("Head")
+		end
+		if aimHead then
+			local lookDir = aimHead.CFrame.LookVector
 			launchCF = CFrame.lookAt(spawnPos, spawnPos + lookDir)
 		else
 			launchCF = spawnWorldCF
