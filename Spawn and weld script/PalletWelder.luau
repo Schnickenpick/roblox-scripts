@@ -664,6 +664,14 @@ local function startWeld()
 
         local rootCF = RootPart.CFrame
 
+        -- Find PivotPoint overrides per group
+        local groupPivotOverrides = {}  -- { [groupName] = CFrame offset }
+        for _, child in ipairs(Children) do
+            if child.name == "PivotPoint" and child.followGroup and child.offset then
+                groupPivotOverrides[child.followGroup] = child.offset
+            end
+        end
+
         -- Pre-compute follow group delta rotations
         local followPivots = {}  -- { [groupName] = { deltaRot = CFrame, pivotOffset = CFrame } }
         for groupName, link in pairs(ActiveFollowLinks) do
@@ -676,9 +684,11 @@ local function startWeld()
                 -- Delta = difference from base rotation at activation time
                 local baseRot = link.baseHeadRot or CFrame.identity
                 local deltaRot = baseRot:Inverse() * currentHeadRot
+                -- Use PivotPoint if available, otherwise fall back to button position
+                local pivotOffset = groupPivotOverrides[groupName] or link.buttonChild.offset
                 followPivots[groupName] = {
                     deltaRot = deltaRot,
-                    pivotOffset = link.buttonChild.offset,
+                    pivotOffset = pivotOffset,
                 }
             end
         end
@@ -1238,8 +1248,8 @@ IOLeft:AddButton({
         local childrenStr = {}
         local count = 0
         for _, child in ipairs(Children) do
-            -- Include virtual markers (RocketSpawn) even though they have no part
-            if (child.part and child.part.Parent) or (child.name == "RocketSpawn") then
+            -- Include virtual markers (RocketSpawn, PivotPoint) even though they have no part
+            if (child.part and child.part.Parent) or child.name == "RocketSpawn" or child.name == "PivotPoint" then
                 local arr = cfToArray(child.offset)
                 local offsetStr = "[" .. table.concat(arr, ",") .. "]"
                 local toyName = (child.name or "Unknown"):gsub('"', '\\"')
@@ -1381,16 +1391,16 @@ IORight:AddButton({
             for i, entry in ipairs(data.children) do
                 local offset = arrayToCf(entry.offset)
 
-                -- RocketSpawn is an editor-only marker — don't spawn, just store offset
-                if entry.toy == "RocketSpawn" then
+                -- RocketSpawn / PivotPoint are editor-only markers — don't spawn, just store offset
+                if entry.toy == "RocketSpawn" or entry.toy == "PivotPoint" then
                     table.insert(Children, {
-                        part       = nil,
-                        raw        = nil,
-                        offset     = offset,
-                        name       = "RocketSpawn",
+                        part        = nil,
+                        raw         = nil,
+                        offset      = offset,
+                        name        = entry.toy,
                         followGroup = entry.followGroup,
                     })
-                    warn("[Import] RocketSpawn marker stored (virtual, no spawn)")
+                    warn("[Import] " .. entry.toy .. " marker stored (virtual, no spawn)")
                     spawned += 1
                     continue
                 end
