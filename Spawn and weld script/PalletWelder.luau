@@ -664,17 +664,20 @@ local function startWeld()
 
         local rootCF = RootPart.CFrame
 
-        -- Pre-compute follow group pivots and head rotations
-        local followPivots = {}  -- { [groupName] = { headRot = CFrame, pivotOffset = CFrame } }
+        -- Pre-compute follow group delta rotations
+        local followPivots = {}  -- { [groupName] = { deltaRot = CFrame, pivotOffset = CFrame } }
         for groupName, link in pairs(ActiveFollowLinks) do
             local plr = link.player
             local char = plr and plr.Character
             local head = char and char:FindFirstChild("Head")
             if head and link.buttonChild and link.buttonChild.offset then
-                -- Head rotation only (strip position)
-                local headRot = head.CFrame - head.CFrame.Position
+                -- Current head rotation (position stripped)
+                local currentHeadRot = head.CFrame - head.CFrame.Position
+                -- Delta = difference from base rotation at activation time
+                local baseRot = link.baseHeadRot or CFrame.identity
+                local deltaRot = baseRot:Inverse() * currentHeadRot
                 followPivots[groupName] = {
-                    headRot = headRot,
+                    deltaRot = deltaRot,
                     pivotOffset = link.buttonChild.offset,
                 }
             end
@@ -685,13 +688,13 @@ local function startWeld()
                 -- Check if this child is in an active follow group
                 local followData = child.followGroup and followPivots[child.followGroup]
 
-                if followData then
-                    -- Follow mode: rotate around the button pivot using the player's head rotation
+                if followData and not (child.tag == "Follow") then
+                    -- Follow mode: rotate around the button pivot using delta head rotation
                     local pivotWorld = rootCF * followData.pivotOffset
                     local localOffset = followData.pivotOffset:Inverse() * child.offset
-                    child.part.CFrame = pivotWorld * followData.headRot * localOffset
+                    child.part.CFrame = pivotWorld * followData.deltaRot * localOffset
                 else
-                    -- Normal weld
+                    -- Normal weld (also used for the Follow button itself)
                     child.part.CFrame = rootCF * child.offset
                 end
 
@@ -935,9 +938,17 @@ local function startRegrab()
                             Notify("Follow", player.Name .. " released " .. groupName, 2)
                         else
                             -- New player or first activation → activate/overwrite
+                            -- Capture the head rotation at activation as the "base" (zero point)
+                            local char = player.Character
+                            local head = char and char:FindFirstChild("Head")
+                            local baseRot = CFrame.identity
+                            if head then
+                                baseRot = head.CFrame - head.CFrame.Position
+                            end
                             ActiveFollowLinks[groupName] = {
                                 player = player,
                                 buttonChild = buttonChild,
+                                baseHeadRot = baseRot,
                             }
                             warn("[Follow] " .. player.Name .. " now controls " .. groupName)
                             Notify("Follow", player.Name .. " controls " .. groupName .. "!", 2)
