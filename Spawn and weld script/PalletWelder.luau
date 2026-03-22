@@ -1641,14 +1641,22 @@ RocketRight:AddLabel({
 -- Trigger BombMissile explosion via game events
 local function explodeRocket(rocketRaw, position)
 	if not rocketRaw or not rocketRaw.Parent then return end
-	-- Spoof a Touched event on the rocket's hitbox/body so the game's own bomb script explodes it server-side
-	local hitbox = rocketRaw:FindFirstChild("PartHitDetector", true)
-		or rocketRaw:FindFirstChild("Body", true)
-		or rocketRaw:FindFirstChildWhichIsA("BasePart", true)
-	if not hitbox then return end
-	-- Touch it with the terrain or baseplate as the "other part"
-	local ground = workspace:FindFirstChild("Baseplate") or workspace.Terrain
-	firesignal(hitbox.Touched, ground)
+	-- Slam the rocket into the ground so it physically collides and the game's own Touched handler fires
+	local bp = getPartFromToy(rocketRaw)
+	if not bp then return end
+	-- Unanchor all parts
+	if rocketRaw:IsA("Model") then
+		for _, p in ipairs(rocketRaw:GetDescendants()) do
+			if p:IsA("BasePart") then
+				p.Anchored = false
+				p.CanCollide = true
+			end
+		end
+	end
+	-- Teleport to just above ground at current X/Z and slam downward
+	local groundY = 5
+	bp.CFrame = CFrame.new(position.X, groundY, position.Z)
+	bp.AssemblyLinearVelocity = Vector3.new(0, -200, 0)
 end
 
 -- Fire rocket function
