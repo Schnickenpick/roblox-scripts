@@ -1640,23 +1640,15 @@ RocketRight:AddLabel({
 
 -- Trigger BombMissile explosion via game events
 local function explodeRocket(rocketRaw, position)
-	if not rocketRaw or not rocketRaw.Parent then return end
-	-- Slam the rocket into the ground so it physically collides and the game's own Touched handler fires
-	local bp = getPartFromToy(rocketRaw)
-	if not bp then return end
-	-- Unanchor all parts
-	if rocketRaw:IsA("Model") then
-		for _, p in ipairs(rocketRaw:GetDescendants()) do
-			if p:IsA("BasePart") then
-				p.Anchored = false
-				p.CanCollide = true
-			end
+	-- No-op: we let the game's own Touched handler handle explosions.
+	-- Our Touched listener disconnects before calling this, then the rocket
+	-- keeps flying and explodes naturally on impact via the game's script.
+	-- If called on timeout, we just destroy the rocket.
+	if rocketRaw and rocketRaw.Parent then
+		if Remotes.DestroyToy then
+			Remotes.DestroyToy:FireServer(rocketRaw)
 		end
 	end
-	-- Teleport to just above ground at current X/Z and slam downward
-	local groundY = 5
-	bp.CFrame = CFrame.new(position.X, groundY, position.Z)
-	bp.AssemblyLinearVelocity = Vector3.new(0, -200, 0)
 end
 
 -- Fire rocket function
@@ -1792,10 +1784,10 @@ fireRocket = function()
 			local char = LP.Character
 			if char and hit:IsDescendantOf(char) then return end
 
+			-- Just disconnect our listener — the game's own bomb Touched handler
+			-- will fire from the same collision and handle the server-side explosion
 			exploded = true
-			if touchConn then touchConn:Disconnect() end
-
-			explodeRocket(rocket.raw, bp.Position)
+			if touchConn then touchConn:Disconnect(); touchConn = nil end
 		end
 
 		-- Find the main collidable part (Body or bp)
@@ -1821,11 +1813,9 @@ fireRocket = function()
 		if tick() - startTime > lifetime then
 			conn:Disconnect()
 			if touchConn then touchConn:Disconnect() end
-			-- Explode on timeout too if it's a bomb
-			if isBomb and shouldExplode and not exploded then
-				exploded = true
-				explodeRocket(rocket.raw, bp.Position)
-			elseif Remotes.DestroyToy and rocket.raw and rocket.raw.Parent then
+			exploded = true
+			-- Lifetime expired — just destroy the rocket
+			if Remotes.DestroyToy and rocket.raw and rocket.raw.Parent then
 				Remotes.DestroyToy:FireServer(rocket.raw)
 			end
 		end
