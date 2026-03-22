@@ -672,18 +672,38 @@ local function startWeld()
             end
         end
 
-        -- Pre-compute follow group delta rotations
+        -- Pre-compute follow group delta rotations (gimbal-lock-safe decomposition)
         local followPivots = {}  -- { [groupName] = { deltaRot = CFrame, pivotOffset = CFrame } }
         for groupName, link in pairs(ActiveFollowLinks) do
             local plr = link.player
             local char = plr and plr.Character
             local head = char and char:FindFirstChild("Head")
             if head and link.buttonChild and link.buttonChild.offset then
-                -- Current head rotation (position stripped)
-                local currentHeadRot = head.CFrame - head.CFrame.Position
-                -- Delta = difference from base rotation at activation time
-                local baseRot = link.baseHeadRot or CFrame.identity
-                local deltaRot = baseRot:Inverse() * currentHeadRot
+                -- Extract yaw and pitch from current head
+                local curLook = head.CFrame.LookVector
+                local curYaw = math.atan2(-curLook.X, -curLook.Z)
+                local curPitch = math.asin(math.clamp(curLook.Y, -1, 1))
+
+                -- Extract yaw and pitch from base (captured at activation)
+                local baseLook = (link.baseHeadRot or CFrame.identity).LookVector
+                local baseYaw = math.atan2(-baseLook.X, -baseLook.Z)
+                local basePitch = math.asin(math.clamp(baseLook.Y, -1, 1))
+
+                -- Delta angles
+                local dYaw = curYaw - baseYaw
+                local dPitch = curPitch - basePitch
+
+                -- Build clean delta rotation based on follow mode
+                local mode = link.followMode or "Both"
+                local deltaRot
+                if mode == "Yaw" then
+                    deltaRot = CFrame.Angles(0, dYaw, 0)
+                elseif mode == "Pitch" then
+                    deltaRot = CFrame.Angles(dPitch, 0, 0)
+                else -- "Both"
+                    deltaRot = CFrame.Angles(0, dYaw, 0) * CFrame.Angles(dPitch, 0, 0)
+                end
+
                 -- Use PivotPoint if available, otherwise fall back to button position
                 local pivotOffset = groupPivotOverrides[groupName] or link.buttonChild.offset
                 followPivots[groupName] = {
@@ -955,10 +975,13 @@ local function startRegrab()
                             if head then
                                 baseRot = head.CFrame - head.CFrame.Position
                             end
+                            -- Determine follow mode from button child's followMode field
+                            local mode = buttonChild.followMode or "Both"
                             ActiveFollowLinks[groupName] = {
                                 player = player,
                                 buttonChild = buttonChild,
                                 baseHeadRot = baseRot,
+                                followMode = mode,
                             }
                             warn("[Follow] " .. player.Name .. " now controls " .. groupName)
                             Notify("Follow", player.Name .. " controls " .. groupName .. "!", 2)
@@ -1260,6 +1283,9 @@ IOLeft:AddButton({
                 if child.followGroup then
                     entry = entry .. ',"followGroup":"' .. tostring(child.followGroup):gsub('"', '\\"') .. '"'
                 end
+                if child.followMode and child.followMode ~= "Both" then
+                    entry = entry .. ',"followMode":"' .. tostring(child.followMode):gsub('"', '\\"') .. '"'
+                end
                 entry = entry .. '}'
                 table.insert(childrenStr, entry)
                 count += 1
@@ -1399,6 +1425,7 @@ IORight:AddButton({
                         offset      = offset,
                         name        = entry.toy,
                         followGroup = entry.followGroup,
+                        followMode  = entry.followMode,
                     })
                     warn("[Import] " .. entry.toy .. " marker stored (virtual, no spawn)")
                     spawned += 1
@@ -1422,6 +1449,7 @@ IORight:AddButton({
                         name        = entry.toy,
                         tag         = entry.tag,
                         followGroup = entry.followGroup,
+                        followMode  = entry.followMode,
                     })
                     spawned += 1
                 else
@@ -1668,8 +1696,15 @@ fireRocket = function()
 	local spawnChild = getRocketSpawnChild()
 
 	if weldActive and RootPart and RootPart.Parent and spawnChild then
-		-- Use the marker's world CFrame — its LookVector (front face / decal direction) is the fire direction
-		launchCF = RootPart.CFrame * spawnChild.offset
+		-- Spawn at marker position, but fire in the player's look direction
+		local spawnPos = (RootPart.CFrame * spawnChild.offset).Position
+		local head = LP.Character and LP.Character:FindFirstChild("Head")
+		if head then
+			local lookDir = head.CFrame.LookVector
+			launchCF = CFrame.lookAt(spawnPos, spawnPos + lookDir)
+		else
+			launchCF = RootPart.CFrame * spawnChild.offset
+		end
 	else
 		local hrp = getRoot()
 		if not hrp then return end
