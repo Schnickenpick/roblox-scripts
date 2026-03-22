@@ -85,11 +85,6 @@ task.spawn(function()
         Remotes.SpawnToy   = MT:FindFirstChild("SpawnToyRemoteFunction")
         Remotes.DestroyToy = MT:FindFirstChild("DestroyToy")
     end
-    local BE = RS:WaitForChild("BombEvents", 10)
-    if BE then
-        Remotes.BombExplode    = BE:FindFirstChild("BombExplode")
-        Remotes.BombReplicator = BE:FindFirstChild("BombReplicator")
-    end
 end)
 
 -- ============================================================
@@ -1646,34 +1641,14 @@ RocketRight:AddLabel({
 -- Trigger BombMissile explosion via game events
 local function explodeRocket(rocketRaw, position)
 	if not rocketRaw or not rocketRaw.Parent then return end
-
-	-- Find bomb parts inside the model
+	-- Spoof a Touched event on the rocket's hitbox/body so the game's own bomb script explodes it server-side
 	local hitbox = rocketRaw:FindFirstChild("PartHitDetector", true)
-	local body = rocketRaw:FindFirstChild("Body", true)
-
-	local explodeData = {
-		Radius = 17.5,
-		TimeLength = 0.5,
-		ExplodedOnce = false,
-		Model = rocketRaw,
-		ExplodesByFire = true,
-		ImpactSpeed = 100,
-		Hitbox = hitbox,
-		DestroysModel = true,
-		ExplodesByPointy = false,
-		MaxForcePerStudSquared = 225,
-		PositionPart = body,
-	}
-
-	-- Fire BombExplode (visual explosion for all clients)
-	if Remotes.BombExplode then
-		firesignal(Remotes.BombExplode.OnClientEvent, explodeData, position)
-	end
-
-	-- Fire BombReplicator (replicates to other clients)
-	if Remotes.BombReplicator then
-		firesignal(Remotes.BombReplicator.OnClientEvent, explodeData)
-	end
+		or rocketRaw:FindFirstChild("Body", true)
+		or rocketRaw:FindFirstChildWhichIsA("BasePart", true)
+	if not hitbox then return end
+	-- Touch it with the terrain or baseplate as the "other part"
+	local ground = workspace:FindFirstChild("Baseplate") or workspace.Terrain
+	firesignal(hitbox.Touched, ground)
 end
 
 -- Fire rocket function
