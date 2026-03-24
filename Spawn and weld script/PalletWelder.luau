@@ -1325,8 +1325,37 @@ StealRight:AddButton({
         if stickyPart then
             local weld = stickyPart:FindFirstChild("StickyWeld")
             if weld then
+                -- Disable sticky detection so game doesn't re-stick
+                stickyPart.CanTouch = false
+                stickyPart.CanCollide = false
                 weld:Destroy()
-                Notify("Attach", "Build detached!", 2)
+
+                -- TP root far away from the player to avoid re-stick
+                local hrp = getRoot()
+                if hrp and RootPart then
+                    local safeCF = hrp.CFrame * CFrame.new(0, 50, 0)
+                    RootPart.CFrame = safeCF
+                    RootPart.AssemblyLinearVelocity = Vector3.zero
+                    RootPart.AssemblyAngularVelocity = Vector3.zero
+                end
+
+                -- Reclaim ownership
+                task.spawn(function()
+                    local netPart = RootPartRaw:FindFirstChild("HitboxBodyTop", true)
+                        or RootPartRaw:FindFirstChild("SoundPart", true)
+                        or RootPart
+                    if Remotes.SetNetworkOwner and netPart then
+                        for attempt = 1, 3 do
+                            Remotes.SetNetworkOwner:FireServer(netPart, getRoot().CFrame)
+                            task.wait(0.3)
+                        end
+                    end
+                    -- Re-enable touch after a delay (safe distance by now)
+                    task.wait(1)
+                    stickyPart.CanTouch = true
+                end)
+
+                Notify("Attach", "Build detached + moved to safety!", 2)
             else
                 Notify("Attach", "No StickyWeld found (not attached?)", 2)
             end
