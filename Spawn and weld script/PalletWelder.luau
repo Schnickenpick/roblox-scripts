@@ -1009,11 +1009,39 @@ local function startRegrab()
 
         -- Always reclaim regardless of button or not
         task.spawn(function()
+            local protectionMode = Toggles.ProtectionMode and Toggles.ProtectionMode.Value
+            local savedCF = nil
+
+            -- Find best net part (HitboxBodyTop > SoundPart > grabbedPart)
+            local bestNetPart = netPart
+            if toyRaw:IsA("Model") then
+                local hitbox = toyRaw:FindFirstChild("HitboxBodyTop", true)
+                if hitbox then bestNetPart = hitbox end
+            end
+
+            if protectionMode then
+                -- Save position, TP to stolen part
+                savedCF = hrp.CFrame
+                local targetCF = grabbedPart.CFrame
+                hrp.CFrame = targetCF
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
+                task.wait(0.1)
+            end
+
             for attempt = 1, 3 do
                 if Remotes.SetNetworkOwner then
-                    Remotes.SetNetworkOwner:FireServer(netPart, hrp.CFrame)
+                    Remotes.SetNetworkOwner:FireServer(bestNetPart, hrp.CFrame)
                 end
                 if attempt < 3 then task.wait(0.3) end
+            end
+
+            if protectionMode and savedCF then
+                -- TP back
+                task.wait(0.2)
+                hrp.CFrame = savedCF
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
             end
         end)
     end)
@@ -1044,6 +1072,12 @@ Right:AddToggle("AutoRegrab", {
             Notify("Anti-Steal", "Disabled.", 2)
         end
     end,
+})
+
+Right:AddToggle("ProtectionMode", {
+    Text    = "Protection Mode (TP to reclaim)",
+    Default = false,
+    Tooltip = "When someone steals a part, TPs you to it before reclaiming for better success rate, then TPs back",
 })
 
 -- ============================================================
