@@ -1414,9 +1414,16 @@ local function isPlotUnclaimed(plotNum)
     local plotSign = plot:FindFirstChild("PlotSign")
     if not plotSign then return false end
     local owners = plotSign:FindFirstChild("ThisPlotsOwners")
-    if not owners then return false end
-    local hasOwners = #owners:GetChildren() > 0
-    warn("[House] Plot " .. plotNum .. ": ThisPlotsOwners has " .. #owners:GetChildren() .. " children → " .. (hasOwners and "CLAIMED" or "UNCLAIMED"))
+    if not owners then
+        warn("[House] Plot " .. plotNum .. ": no ThisPlotsOwners folder found → treating as UNCLAIMED")
+        return true  -- no owners folder = unclaimed
+    end
+    local children = owners:GetChildren()
+    warn("[House] Plot " .. plotNum .. ": ThisPlotsOwners has " .. #children .. " children:")
+    for _, child in ipairs(children) do
+        warn("[House]   - " .. child.ClassName .. " '" .. child.Name .. "' = " .. tostring(pcall(function() return child.Value end) and child.Value or "N/A"))
+    end
+    local hasOwners = #children > 0
     return not hasOwners
 end
 
@@ -1472,9 +1479,15 @@ HouseLeft:AddButton({
 
 HouseLeft:AddDivider()
 
+HouseLeft:AddToggle("SkipHouseCheck", {
+    Text    = "Skip Claim Check (use selected plot)",
+    Default = false,
+    Tooltip = "Skip scanning for unclaimed houses and use the manually selected plot instead",
+})
+
 HouseLeft:AddButton({
     Text    = "Auto House Mode",
-    Tooltip = "Finds unclaimed house, deletes barriers, bugs protection, claims ownership — all in one",
+    Tooltip = "Deletes barriers, bugs protection, claims ownership — all in one",
     Func    = function()
         task.spawn(function()
             local hrp = getRoot()
@@ -1486,15 +1499,23 @@ HouseLeft:AddButton({
             -- Step 0: Save original position
             local originalCF = hrp.CFrame
 
-            -- Step 1: Find unclaimed house
-            Notify("House", "Scanning for unclaimed house...", 2)
-            local plotNum = findFirstUnclaimedPlot()
-            if not plotNum then
-                Notify("House", "All houses are claimed!", 4)
-                return
+            -- Step 1: Find house
+            local plotNum
+            if Toggles.SkipHouseCheck and Toggles.SkipHouseCheck.Value then
+                -- Use manually selected plot
+                local sel = Options.HousePlot and Options.HousePlot.Value or "Plot 1"
+                plotNum = tonumber(sel:match("%d+")) or 1
+                Notify("House", "Skipping check — using Plot " .. plotNum, 2)
+            else
+                Notify("House", "Scanning for unclaimed house...", 2)
+                plotNum = findFirstUnclaimedPlot()
+                if not plotNum then
+                    Notify("House", "All houses are claimed! Enable 'Skip Claim Check' to force a plot.", 4)
+                    return
+                end
+                Notify("House", "Found unclaimed Plot " .. plotNum .. "!", 2)
             end
             local plotPos = PLOT_POSITIONS[plotNum]
-            Notify("House", "Found unclaimed Plot " .. plotNum .. "!", 2)
 
             -- Step 2: Delete all barriers
             local plots = workspace:FindFirstChild("Plots")
