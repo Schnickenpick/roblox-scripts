@@ -1256,37 +1256,81 @@ StealRight:AddButton({
 
 StealRight:AddDivider()
 
+-- CFrame-based attach system
+local attachConn = nil  -- Heartbeat connection for attach loop
+local attachTarget = nil  -- { player = Player, bodyPart = string }
+
+local function getOwnedPlotNum()
+    local plots = workspace:FindFirstChild("Plots")
+    if not plots then return nil end
+    for i = 1, 5 do
+        local plot = plots:FindFirstChild("Plot" .. i)
+        if not plot then continue end
+        local plotSign = plot:FindFirstChild("PlotSign")
+        if not plotSign then continue end
+        local owners = plotSign:FindFirstChild("ThisPlotsOwners")
+        if not owners then continue end
+        for _, child in ipairs(owners:GetChildren()) do
+            if child:IsA("StringValue") and child.Value == LP.Name then
+                return i
+            end
+            if child:IsA("ObjectValue") and child.Value == LP then
+                return i
+            end
+            -- Also check by Name matching our username
+            if child.Name == LP.Name then
+                return i
+            end
+        end
+    end
+    return nil
+end
+
+local function findRootInPlotItems()
+    if not RootPartRaw then return nil end
+    local plotNum = getOwnedPlotNum()
+    if not plotNum then return nil end
+    local plotItems = workspace:FindFirstChild("PlotItems")
+    if not plotItems then return nil end
+    local plotFolder = plotItems:FindFirstChild("Plot" .. plotNum)
+    if not plotFolder then return nil end
+    -- Find the root toy by name in the plot folder
+    local rootName = RootPartRaw.Name:gsub("_placed", "")
+    for _, item in ipairs(plotFolder:GetChildren()) do
+        if item.Name == rootName or item.Name == RootPartRaw.Name then
+            return item
+        end
+    end
+    -- Fallback: find by matching toy name
+    for _, item in ipairs(plotFolder:GetChildren()) do
+        local tn = item:FindFirstChild("ToyName")
+        if tn and RootPartRaw:FindFirstChild("ToyName") and tn.Value == RootPartRaw:FindFirstChild("ToyName").Value then
+            return item
+        end
+    end
+    return nil
+end
+
+local function stopAttach()
+    if attachConn then
+        attachConn:Disconnect()
+        attachConn = nil
+    end
+    attachTarget = nil
+end
+
 StealRight:AddDropdown("AttachBodyPart", {
     Text     = "Body Part",
     Default  = 1,
     Values   = {"Torso", "Head", "Left Arm", "Right Arm", "Left Leg", "Right Leg", "HumanoidRootPart"},
     Multi    = false,
-    Tooltip  = "Which body part to stick the build root onto",
+    Tooltip  = "Which body part the root follows",
 })
 
 StealRight:AddButton({
     Text    = "Attach Build to Player",
-    Tooltip = "Sticks the root toy onto the selected player using StickyPartEvent",
+    Tooltip = "CFrame-welds the root to follow the selected player's body part every frame",
     Func    = function()
-        if not RootPart or not RootPartRaw then
-            Notify("Attach", "No root part! Set root first.", 3)
-            return
-        end
-        if not Remotes.StickyPartEvent then
-            Notify("Attach", "StickyPartEvent remote not found!", 3)
-            return
-        end
-
-        -- Find StickyPart on the root toy
-        local stickyPart = nil
-        if RootPartRaw:IsA("Model") then
-            stickyPart = RootPartRaw:FindFirstChild("StickyPart", true)
-        end
-        if not stickyPart then
-            Notify("Attach", "Root toy has no StickyPart! Use a shuriken or similar sticky toy.", 4)
-            return
-        end
-
         -- Get target player
         local targetName = Options.TargetPlayer and Options.TargetPlayer.Value
         if not targetName or targetName == "" then
@@ -1299,7 +1343,6 @@ StealRight:AddButton({
             return
         end
 
-        -- Get target body part
         local bodyPartName = Options.AttachBodyPart and Options.AttachBodyPart.Value or "Torso"
         local targetPart = target.Character:FindFirstChild(bodyPartName)
         if not targetPart then
@@ -1307,64 +1350,60 @@ StealRight:AddButton({
             return
         end
 
-        -- Fire StickyPartEvent to stick root to the target
-        local offset = CFrame.new(0, 0, 0)
-        Remotes.StickyPartEvent:FireServer(stickyPart, targetPart, offset)
-        Notify("Attach", "Stuck build to " .. targetName .. "'s " .. bodyPartName .. "!", 3)
+        -- Find root — check PlotItems first, then normal RootPart
+        local rootBP = nil
+        local plotRoot = findRootInPlotItems()
+        if plotRoot then
+            local bp = getPartFromToy(plotRoot)
+            if bp then
+                rootBP = bp
+                warn("[Attach] Found root in PlotItems: " .. plotRoot.Name)
+            end
+        end
+        if not rootBP and RootPart and RootPart.Parent then
+            rootBP = RootPart
+            warn("[Attach] Using normal RootPart")
+        end
+        if not rootBP then
+            Notify("Attach", "No root found! Import a build first.", 3)
+            return
+        end
+
+        -- Stop any existing attach
+        stopAttach()
+
+        -- Capture offset: how the root is oriented right now relative to the body part
+        local baseOffset = targetPart.CFrame:Inverse() * rootBP.CFrame
+
+        attachTarget = { player = target, bodyPart = bodyPartName }
+        attachConn = RunService.Heartbeat:Connect(function()
+            local char = target.Character
+            if not char then return end
+            local part = char:FindFirstChild(bodyPartName)
+            if not part then return end
+            if not rootBP or not rootBP.Parent then
+                stopAttach()
+                return
+            end
+            -- Move root to follow body part (preserving original offset)
+            rootBP.CFrame = part.CFrame * baseOffset
+            rootBP.AssemblyLinearVelocity = Vector3.zero
+            rootBP.AssemblyAngularVelocity = Vector3.zero
+        end)
+
+        Notify("Attach", "Build following " .. targetName .. "'s " .. bodyPartName .. "!", 3)
     end,
 })
 
 StealRight:AddButton({
     Text    = "Detach Build",
-    Tooltip = "Removes the sticky weld from the root toy",
+    Tooltip = "Stops the CFrame attach loop",
     Func    = function()
-        if not RootPartRaw then
-            Notify("Attach", "No root part!", 3)
-            return
-        end
-        local stickyPart = nil
-        if RootPartRaw:IsA("Model") then
-            stickyPart = RootPartRaw:FindFirstChild("StickyPart", true)
-        end
-        if stickyPart then
-            local weld = stickyPart:FindFirstChild("StickyWeld")
-            if weld then
-                -- Disable sticky detection so game doesn't re-stick
-                stickyPart.CanTouch = false
-                stickyPart.CanCollide = false
-                weld:Destroy()
-
-                -- TP root far away from the player to avoid re-stick
-                local hrp = getRoot()
-                if hrp and RootPart then
-                    local safeCF = hrp.CFrame * CFrame.new(0, 50, 0)
-                    RootPart.CFrame = safeCF
-                    RootPart.AssemblyLinearVelocity = Vector3.zero
-                    RootPart.AssemblyAngularVelocity = Vector3.zero
-                end
-
-                -- Reclaim ownership
-                task.spawn(function()
-                    local netPart = RootPartRaw:FindFirstChild("HitboxBodyTop", true)
-                        or RootPartRaw:FindFirstChild("SoundPart", true)
-                        or RootPart
-                    if Remotes.SetNetworkOwner and netPart then
-                        for attempt = 1, 3 do
-                            Remotes.SetNetworkOwner:FireServer(netPart, getRoot().CFrame)
-                            task.wait(0.3)
-                        end
-                    end
-                    -- Re-enable touch after a delay (safe distance by now)
-                    task.wait(1)
-                    stickyPart.CanTouch = true
-                end)
-
-                Notify("Attach", "Build detached + moved to safety!", 2)
-            else
-                Notify("Attach", "No StickyWeld found (not attached?)", 2)
-            end
+        if attachConn then
+            stopAttach()
+            Notify("Attach", "Build detached!", 2)
         else
-            Notify("Attach", "Root has no StickyPart!", 3)
+            Notify("Attach", "Not attached to anyone.", 2)
         end
     end,
 })
