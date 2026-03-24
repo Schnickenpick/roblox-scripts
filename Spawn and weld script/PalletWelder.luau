@@ -54,6 +54,7 @@ local Tabs = {
     Steal      = Window:AddTab("Players",    "users"),
     IO         = Window:AddTab("Import/Export", "save"),
     Rockets    = Window:AddTab("Rockets",    "zap"),
+    House      = Window:AddTab("House",      "home"),
     UISettings = Window:AddTab("UI",         "settings"),
 }
 
@@ -68,6 +69,9 @@ local IORight = Tabs.IO:AddRightGroupbox("Import", "box")
 
 local RocketLeft  = Tabs.Rockets:AddLeftGroupbox("Stockpile",  "box")
 local RocketRight = Tabs.Rockets:AddRightGroupbox("Launch",    "zap")
+
+local HouseLeft  = Tabs.House:AddLeftGroupbox("House Mode",  "box")
+local HouseRight = Tabs.House:AddRightGroupbox("Status",     "info")
 
 -- ============================================================
 -- [[ 4. REMOTES ]]
@@ -1361,6 +1365,303 @@ StealRight:AddButton({
             end
         else
             Notify("Attach", "Root has no StickyPart!", 3)
+        end
+    end,
+})
+
+-- ============================================================
+-- [[ 15.7. HOUSE MODE ]]
+-- ============================================================
+
+-- Sign paths per plot: each entry is a function that returns the sign instance
+local PLOT_SIGNS = {
+    [1] = {
+        indices = {11, 5, 8, 10, 9},
+        hasNamedSign = true,
+        pos = Vector3.new(-536, -7, 90),
+    },
+    [2] = {
+        indices = {10, nil, 7, 9, 8},  -- slot 2 is .Sign, slot 6 is PlotLimitSign.Sign
+        hasNamedSign = true,
+        hasLimitSign = true,
+        pos = Vector3.new(-483, -7, -171),
+    },
+    [3] = {
+        indices = {11, 5, 8, 10, 9},
+        hasNamedSign = true,
+        pos = Vector3.new(254, -7, 458),
+    },
+    [4] = {
+        indices = {9, 8, 7, 6, 4},
+        hasNamedSign = true,
+        pos = Vector3.new(518, 83, -340),
+    },
+    [5] = {
+        indices = {11, 10, 9, 8, 5},
+        hasNamedSign = true,
+        pos = Vector3.new(557, 123, -76),
+    },
+}
+
+local function getPlotSigns(plotNum)
+    local plotData = PLOT_SIGNS[plotNum]
+    if not plotData then return {} end
+
+    local plots = workspace:FindFirstChild("Plots")
+    if not plots then return {} end
+    local plot = plots:FindFirstChild("Plot" .. plotNum)
+    if not plot then return {} end
+    local plotSign = plot:FindFirstChild("PlotSign")
+    if not plotSign then return {} end
+
+    local signs = {}
+    local children = plotSign:GetChildren()
+
+    -- Add indexed signs
+    for _, idx in ipairs(plotData.indices) do
+        if idx and children[idx] then
+            table.insert(signs, children[idx])
+        end
+    end
+
+    -- Add named Sign
+    if plotData.hasNamedSign then
+        local s = plotSign:FindFirstChild("Sign")
+        if s then table.insert(signs, s) end
+    end
+
+    -- Plot 2 special: PlotLimitSign.Sign
+    if plotData.hasLimitSign then
+        local pls = plotSign:FindFirstChild("PlotLimitSign")
+        if pls then
+            local s = pls:FindFirstChild("Sign")
+            if s then table.insert(signs, s) end
+        end
+    end
+
+    return signs
+end
+
+local function isPlotUnclaimed(plotNum)
+    local signs = getPlotSigns(plotNum)
+    if #signs == 0 then return false end
+    for _, sign in ipairs(signs) do
+        local screen = sign:FindFirstChild("Screen")
+        if screen then
+            local sg = screen:FindFirstChild("SurfaceGui")
+            if sg then
+                local frame = sg:FindFirstChild("Frame")
+                if frame then
+                    local pdn = frame:FindFirstChild("PlayerDisplayName")
+                    if pdn and pdn.ContentText and pdn.ContentText ~= "" then
+                        return false  -- someone is on this sign
+                    end
+                end
+            end
+        end
+    end
+    return true
+end
+
+local function findFirstUnclaimedPlot()
+    for i = 1, 5 do
+        if isPlotUnclaimed(i) then
+            return i
+        end
+    end
+    return nil
+end
+
+local HouseStatusLabel = HouseRight:AddLabel("No house selected")
+
+-- Show plot status
+HouseRight:AddButton({
+    Text    = "Scan Houses",
+    Tooltip = "Check which houses are unclaimed",
+    Func    = function()
+        local results = {}
+        for i = 1, 5 do
+            local status = isPlotUnclaimed(i) and "UNCLAIMED" or "claimed"
+            table.insert(results, "Plot " .. i .. ": " .. status)
+        end
+        HouseStatusLabel:SetText(table.concat(results, "\n"))
+        Notify("House", table.concat(results, " | "), 5)
+    end,
+})
+
+HouseLeft:AddButton({
+    Text    = "Delete All Barriers",
+    Tooltip = "Removes all 5 plot barriers client-side",
+    Func    = function()
+        local plots = workspace:FindFirstChild("Plots")
+        if not plots then
+            Notify("House", "No Plots folder found!", 3)
+            return
+        end
+        local count = 0
+        for i = 1, 5 do
+            local plot = plots:FindFirstChild("Plot" .. i)
+            if plot then
+                local barrier = plot:FindFirstChild("Barrier")
+                if barrier then
+                    barrier:Destroy()
+                    count += 1
+                end
+            end
+        end
+        Notify("House", "Deleted " .. count .. " barriers!", 2)
+    end,
+})
+
+HouseLeft:AddDivider()
+
+HouseLeft:AddButton({
+    Text    = "Auto House Mode",
+    Tooltip = "Finds unclaimed house, deletes barriers, bugs protection, claims ownership — all in one",
+    Func    = function()
+        task.spawn(function()
+            local hrp = getRoot()
+            if not hrp then
+                Notify("House", "No character!", 3)
+                return
+            end
+
+            -- Step 0: Save original position
+            local originalCF = hrp.CFrame
+
+            -- Step 1: Find unclaimed house
+            Notify("House", "Scanning for unclaimed house...", 2)
+            local plotNum = findFirstUnclaimedPlot()
+            if not plotNum then
+                Notify("House", "All houses are claimed!", 4)
+                return
+            end
+            local plotData = PLOT_SIGNS[plotNum]
+            Notify("House", "Found unclaimed Plot " .. plotNum .. "!", 2)
+
+            -- Step 2: Delete all barriers
+            local plots = workspace:FindFirstChild("Plots")
+            if plots then
+                for i = 1, 5 do
+                    local plot = plots:FindFirstChild("Plot" .. i)
+                    if plot then
+                        local barrier = plot:FindFirstChild("Barrier")
+                        if barrier then barrier:Destroy() end
+                    end
+                end
+            end
+            Notify("House", "Barriers deleted!", 1)
+
+            -- Step 3: Spawn banana
+            if not Remotes.SpawnToy then
+                Notify("House", "SpawnToy remote not found!", 3)
+                return
+            end
+            local spawnCF = hrp.CFrame * CFrame.new(0, 0, -3)
+            Remotes.SpawnToy:InvokeServer("FoodBanana", spawnCF, Vector3.zero)
+            task.wait(0.5)
+
+            -- Find the banana
+            local toyFolder = getToyFolder()
+            if not toyFolder then
+                Notify("House", "Toy folder not found!", 3)
+                return
+            end
+            local banana = toyFolder:FindFirstChild("FoodBanana")
+            if not banana then
+                Notify("House", "Banana failed to spawn!", 3)
+                return
+            end
+
+            -- Step 4: Pick up banana
+            local holdPart = banana:FindFirstChild("HoldPart")
+            if not holdPart then
+                Notify("House", "Banana has no HoldPart!", 3)
+                return
+            end
+            local holdRemote = holdPart:FindFirstChild("HoldItemRemoteFunction")
+            if not holdRemote then
+                Notify("House", "HoldItemRemoteFunction not found!", 3)
+                return
+            end
+            holdRemote:InvokeServer(banana, LP.Character)
+            task.wait(0.3)
+            Notify("House", "Picked up banana!", 1)
+
+            -- Step 5: TP to house
+            local houseCF = CFrame.new(plotData.pos)
+            hrp.CFrame = houseCF
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+            task.wait(0.5)
+
+            -- Step 6: Drop banana inside house
+            local dropRemote = holdPart:FindFirstChild("DropItemRemoteFunction")
+            if not dropRemote then
+                Notify("House", "DropItemRemoteFunction not found!", 3)
+                return
+            end
+            dropRemote:InvokeServer(banana, hrp.CFrame, Vector3.new(0, -50, 0))
+            task.wait(0.1)
+
+            -- Step 7: Immediately destroy banana
+            if Remotes.DestroyToy and banana and banana.Parent then
+                Remotes.DestroyToy:FireServer(banana)
+            end
+            task.wait(0.3)
+            Notify("House", "House protection bugged!", 2)
+
+            -- Step 8: Claim ownership — fire SetNetworkOwner on a sign's PlusGrabPart
+            local signs = getPlotSigns(plotNum)
+            if #signs > 0 and Remotes.SetNetworkOwner then
+                local firstSign = signs[1]
+                local plus = firstSign:FindFirstChild("Plus")
+                if plus then
+                    local grabPart = plus:FindFirstChild("PlusGrabPart")
+                    if grabPart then
+                        Remotes.SetNetworkOwner:FireServer(grabPart, hrp.CFrame)
+                        task.wait(0.3)
+                        Notify("House", "Claimed Plot " .. plotNum .. "!", 2)
+                    end
+                end
+            end
+
+            -- Step 9: TP back
+            hrp.CFrame = originalCF
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+
+            HouseStatusLabel:SetText("Active house: Plot " .. plotNum .. "\nPos: " .. tostring(plotData.pos))
+            Notify("House", "House mode ready! Plot " .. plotNum .. " is yours. Import your build there!", 5)
+        end)
+    end,
+})
+
+HouseLeft:AddDivider()
+
+HouseLeft:AddLabel("Manual plot selection:")
+
+HouseLeft:AddDropdown("HousePlot", {
+    Text     = "Select Plot",
+    Default  = 1,
+    Values   = {"Plot 1", "Plot 2", "Plot 3", "Plot 4", "Plot 5"},
+    Multi    = false,
+    Tooltip  = "Manually pick which plot to use",
+})
+
+HouseLeft:AddButton({
+    Text    = "TP to Selected Plot",
+    Tooltip = "Teleports you inside the selected house",
+    Func    = function()
+        local hrp = getRoot()
+        if not hrp then return end
+        local sel = Options.HousePlot and Options.HousePlot.Value or "Plot 1"
+        local plotNum = tonumber(sel:match("%d+"))
+        if plotNum and PLOT_SIGNS[plotNum] then
+            hrp.CFrame = CFrame.new(PLOT_SIGNS[plotNum].pos)
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+            Notify("House", "Teleported to Plot " .. plotNum, 2)
         end
     end,
 })
