@@ -1411,7 +1411,9 @@ local function isPlotUnclaimed(plotNum)
     if not plots then return false end
     local plot = plots:FindFirstChild("Plot" .. plotNum)
     if not plot then return false end
-    local owners = plot:FindFirstChild("ThisPlotsOwners")
+    local plotSign = plot:FindFirstChild("PlotSign")
+    if not plotSign then return false end
+    local owners = plotSign:FindFirstChild("ThisPlotsOwners")
     if not owners then return false end
     local hasOwners = #owners:GetChildren() > 0
     warn("[House] Plot " .. plotNum .. ": ThisPlotsOwners has " .. #owners:GetChildren() .. " children → " .. (hasOwners and "CLAIMED" or "UNCLAIMED"))
