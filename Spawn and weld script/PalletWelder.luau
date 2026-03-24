@@ -1373,40 +1373,16 @@ StealRight:AddButton({
 -- [[ 15.7. HOUSE MODE ]]
 -- ============================================================
 
--- Sign paths per plot: each entry is a function that returns the sign instance
-local PLOT_SIGNS = {
-    [1] = {
-        indices = {11, 5, 8, 10, 9},
-        hasNamedSign = true,
-        pos = Vector3.new(-536, -7, 90),
-    },
-    [2] = {
-        indices = {10, nil, 7, 9, 8},  -- slot 2 is .Sign, slot 6 is PlotLimitSign.Sign
-        hasNamedSign = true,
-        hasLimitSign = true,
-        pos = Vector3.new(-483, -7, -171),
-    },
-    [3] = {
-        indices = {11, 5, 8, 10, 9},
-        hasNamedSign = true,
-        pos = Vector3.new(254, -7, 458),
-    },
-    [4] = {
-        indices = {9, 8, 7, 6, 4},
-        hasNamedSign = true,
-        pos = Vector3.new(518, 83, -340),
-    },
-    [5] = {
-        indices = {11, 10, 9, 8, 5},
-        hasNamedSign = true,
-        pos = Vector3.new(557, 123, -76),
-    },
+local PLOT_POSITIONS = {
+    [1] = Vector3.new(-536, -7, 90),
+    [2] = Vector3.new(-483, -7, -171),
+    [3] = Vector3.new(254, -7, 458),
+    [4] = Vector3.new(518, 83, -340),
+    [5] = Vector3.new(557, 123, -76),
 }
 
+-- Auto-discover player signs: any descendant of PlotSign that has Screen.SurfaceGui.Frame.PlayerDisplayName
 local function getPlotSigns(plotNum)
-    local plotData = PLOT_SIGNS[plotNum]
-    if not plotData then return {} end
-
     local plots = workspace:FindFirstChild("Plots")
     if not plots then return {} end
     local plot = plots:FindFirstChild("Plot" .. plotNum)
@@ -1415,75 +1391,31 @@ local function getPlotSigns(plotNum)
     if not plotSign then return {} end
 
     local signs = {}
-    local children = plotSign:GetChildren()
-
-    -- Add indexed signs
-    for _, idx in ipairs(plotData.indices) do
-        if idx and children[idx] then
-            table.insert(signs, children[idx])
+    for _, desc in ipairs(plotSign:GetDescendants()) do
+        if desc.Name == "PlayerDisplayName" and desc:IsA("TextLabel") then
+            -- Walk up to find the sign model (parent chain: PlayerDisplayName > Frame > SurfaceGui > Screen > Sign)
+            local screen = desc.Parent and desc.Parent.Parent and desc.Parent.Parent.Parent
+            if screen and screen.Name == "Screen" then
+                local sign = screen.Parent
+                if sign then
+                    table.insert(signs, {sign = sign, label = desc})
+                end
+            end
         end
     end
-
-    -- Add named Sign
-    if plotData.hasNamedSign then
-        local s = plotSign:FindFirstChild("Sign")
-        if s then table.insert(signs, s) end
-    end
-
-    -- Plot 2 special: PlotLimitSign.Sign
-    if plotData.hasLimitSign then
-        local pls = plotSign:FindFirstChild("PlotLimitSign")
-        if pls then
-            local s = pls:FindFirstChild("Sign")
-            if s then table.insert(signs, s) end
-        end
-    end
-
     return signs
 end
 
 local function isPlotUnclaimed(plotNum)
-    local signs = getPlotSigns(plotNum)
-    warn("[House] Plot " .. plotNum .. ": found " .. #signs .. " signs")
-    if #signs == 0 then return false end
-    for i, sign in ipairs(signs) do
-        local screen = sign:FindFirstChild("Screen")
-        if not screen then
-            warn("[House]   Sign " .. i .. " (" .. sign.Name .. "): no Screen child")
-            -- Try looking for SurfaceGui directly on the sign
-            local sg = sign:FindFirstChildWhichIsA("SurfaceGui", true)
-            if sg then
-                local pdn = sg:FindFirstChild("PlayerDisplayName", true)
-                if pdn then
-                    warn("[House]   Sign " .. i .. ": found PDN via recursive search, ContentText='" .. tostring(pdn.ContentText) .. "'")
-                    if pdn.ContentText and pdn.ContentText ~= "" then
-                        return false
-                    end
-                end
-            end
-            continue
-        end
-        local sg = screen:FindFirstChild("SurfaceGui")
-        if not sg then
-            warn("[House]   Sign " .. i .. " (" .. sign.Name .. "): Screen found but no SurfaceGui")
-            continue
-        end
-        local frame = sg:FindFirstChild("Frame")
-        if not frame then
-            warn("[House]   Sign " .. i .. " (" .. sign.Name .. "): SurfaceGui found but no Frame")
-            continue
-        end
-        local pdn = frame:FindFirstChild("PlayerDisplayName")
-        if not pdn then
-            warn("[House]   Sign " .. i .. " (" .. sign.Name .. "): Frame found but no PlayerDisplayName")
-            continue
-        end
-        warn("[House]   Sign " .. i .. " (" .. sign.Name .. "): ContentText='" .. tostring(pdn.ContentText) .. "'")
-        if pdn.ContentText and pdn.ContentText ~= "" then
-            return false  -- someone is on this sign
-        end
-    end
-    return true
+    local plots = workspace:FindFirstChild("Plots")
+    if not plots then return false end
+    local plot = plots:FindFirstChild("Plot" .. plotNum)
+    if not plot then return false end
+    local owners = plot:FindFirstChild("ThisPlotsOwners")
+    if not owners then return false end
+    local hasOwners = #owners:GetChildren() > 0
+    warn("[House] Plot " .. plotNum .. ": ThisPlotsOwners has " .. #owners:GetChildren() .. " children → " .. (hasOwners and "CLAIMED" or "UNCLAIMED"))
+    return not hasOwners
 end
 
 local function findFirstUnclaimedPlot()
@@ -1559,7 +1491,7 @@ HouseLeft:AddButton({
                 Notify("House", "All houses are claimed!", 4)
                 return
             end
-            local plotData = PLOT_SIGNS[plotNum]
+            local plotPos = PLOT_POSITIONS[plotNum]
             Notify("House", "Found unclaimed Plot " .. plotNum .. "!", 2)
 
             -- Step 2: Delete all barriers
@@ -1612,7 +1544,7 @@ HouseLeft:AddButton({
             Notify("House", "Picked up banana!", 1)
 
             -- Step 5: TP to house
-            local houseCF = CFrame.new(plotData.pos)
+            local houseCF = CFrame.new(plotPos)
             hrp.CFrame = houseCF
             hrp.AssemblyLinearVelocity = Vector3.zero
             hrp.AssemblyAngularVelocity = Vector3.zero
@@ -1637,7 +1569,7 @@ HouseLeft:AddButton({
             -- Step 8: Claim ownership — fire SetNetworkOwner on a sign's PlusGrabPart
             local signs = getPlotSigns(plotNum)
             if #signs > 0 and Remotes.SetNetworkOwner then
-                local firstSign = signs[1]
+                local firstSign = signs[1].sign
                 local plus = firstSign:FindFirstChild("Plus")
                 if plus then
                     local grabPart = plus:FindFirstChild("PlusGrabPart")
@@ -1645,7 +1577,11 @@ HouseLeft:AddButton({
                         Remotes.SetNetworkOwner:FireServer(grabPart, hrp.CFrame)
                         task.wait(0.3)
                         Notify("House", "Claimed Plot " .. plotNum .. "!", 2)
+                    else
+                        warn("[House] No PlusGrabPart in Plus of " .. firstSign.Name)
                     end
+                else
+                    warn("[House] No Plus child in sign " .. firstSign.Name)
                 end
             end
 
@@ -1654,7 +1590,7 @@ HouseLeft:AddButton({
             hrp.AssemblyLinearVelocity = Vector3.zero
             hrp.AssemblyAngularVelocity = Vector3.zero
 
-            HouseStatusLabel:SetText("Active house: Plot " .. plotNum .. "\nPos: " .. tostring(plotData.pos))
+            HouseStatusLabel:SetText("Active house: Plot " .. plotNum .. "\nPos: " .. tostring(plotPos))
             Notify("House", "House mode ready! Plot " .. plotNum .. " is yours. Import your build there!", 5)
         end)
     end,
@@ -1680,8 +1616,8 @@ HouseLeft:AddButton({
         if not hrp then return end
         local sel = Options.HousePlot and Options.HousePlot.Value or "Plot 1"
         local plotNum = tonumber(sel:match("%d+"))
-        if plotNum and PLOT_SIGNS[plotNum] then
-            hrp.CFrame = CFrame.new(PLOT_SIGNS[plotNum].pos)
+        if plotNum and PLOT_POSITIONS[plotNum] then
+            hrp.CFrame = CFrame.new(PLOT_POSITIONS[plotNum])
             hrp.AssemblyLinearVelocity = Vector3.zero
             hrp.AssemblyAngularVelocity = Vector3.zero
             Notify("House", "Teleported to Plot " .. plotNum, 2)
