@@ -1444,20 +1444,43 @@ end
 
 local function isPlotUnclaimed(plotNum)
     local signs = getPlotSigns(plotNum)
+    warn("[House] Plot " .. plotNum .. ": found " .. #signs .. " signs")
     if #signs == 0 then return false end
-    for _, sign in ipairs(signs) do
+    for i, sign in ipairs(signs) do
         local screen = sign:FindFirstChild("Screen")
-        if screen then
-            local sg = screen:FindFirstChild("SurfaceGui")
+        if not screen then
+            warn("[House]   Sign " .. i .. " (" .. sign.Name .. "): no Screen child")
+            -- Try looking for SurfaceGui directly on the sign
+            local sg = sign:FindFirstChildWhichIsA("SurfaceGui", true)
             if sg then
-                local frame = sg:FindFirstChild("Frame")
-                if frame then
-                    local pdn = frame:FindFirstChild("PlayerDisplayName")
-                    if pdn and pdn.ContentText and pdn.ContentText ~= "" then
-                        return false  -- someone is on this sign
+                local pdn = sg:FindFirstChild("PlayerDisplayName", true)
+                if pdn then
+                    warn("[House]   Sign " .. i .. ": found PDN via recursive search, ContentText='" .. tostring(pdn.ContentText) .. "'")
+                    if pdn.ContentText and pdn.ContentText ~= "" then
+                        return false
                     end
                 end
             end
+            continue
+        end
+        local sg = screen:FindFirstChild("SurfaceGui")
+        if not sg then
+            warn("[House]   Sign " .. i .. " (" .. sign.Name .. "): Screen found but no SurfaceGui")
+            continue
+        end
+        local frame = sg:FindFirstChild("Frame")
+        if not frame then
+            warn("[House]   Sign " .. i .. " (" .. sign.Name .. "): SurfaceGui found but no Frame")
+            continue
+        end
+        local pdn = frame:FindFirstChild("PlayerDisplayName")
+        if not pdn then
+            warn("[House]   Sign " .. i .. " (" .. sign.Name .. "): Frame found but no PlayerDisplayName")
+            continue
+        end
+        warn("[House]   Sign " .. i .. " (" .. sign.Name .. "): ContentText='" .. tostring(pdn.ContentText) .. "'")
+        if pdn.ContentText and pdn.ContentText ~= "" then
+            return false  -- someone is on this sign
         end
     end
     return true
