@@ -1563,31 +1563,27 @@ HouseLeft:AddButton({
                 return
             end
             holdRemote:InvokeServer(banana, LP.Character)
-            task.wait(0.3)
-            Notify("House", "Picked up banana!", 1)
+            Notify("House", "Picked up banana! Waiting for drop remote...", 1)
 
-            -- Step 5: TP to house
+            -- Wait for DropItemRemoteFunction to appear (server replicates it after pickup)
+            local dropRemote = holdPart:WaitForChild("DropItemRemoteFunction", 5)
+            if not dropRemote then
+                Notify("House", "DropItemRemoteFunction not found after 5s!", 3)
+                return
+            end
+
+            -- Step 5+6+7: TP, drop, and delete ALL IN THE SAME FRAME
             local houseCF = CFrame.new(plotPos)
             hrp.CFrame = houseCF
             hrp.AssemblyLinearVelocity = Vector3.zero
             hrp.AssemblyAngularVelocity = Vector3.zero
-            task.wait(0.5)
-
-            -- Step 6: Drop banana inside house
-            local dropRemote = holdPart:FindFirstChild("DropItemRemoteFunction")
-            if not dropRemote then
-                Notify("House", "DropItemRemoteFunction not found!", 3)
-                return
-            end
-            dropRemote:InvokeServer(banana, hrp.CFrame, Vector3.new(0, -50, 0))
-            task.wait(0.1)
-
-            -- Step 7: Immediately destroy banana
+            dropRemote:InvokeServer(banana, houseCF, Vector3.new(0, -50, 0))
             if Remotes.DestroyToy and banana and banana.Parent then
                 Remotes.DestroyToy:FireServer(banana)
             end
-            task.wait(0.3)
+
             Notify("House", "House protection bugged!", 2)
+            task.wait(0.3)
 
             -- Step 8: Claim ownership — fire SetNetworkOwner on a sign's PlusGrabPart
             local signs = getPlotSigns(plotNum)
