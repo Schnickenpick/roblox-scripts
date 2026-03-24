@@ -85,6 +85,10 @@ task.spawn(function()
         Remotes.SpawnToy   = MT:FindFirstChild("SpawnToyRemoteFunction")
         Remotes.DestroyToy = MT:FindFirstChild("DestroyToy")
     end
+    local PE = RS:WaitForChild("PlayerEvents", 10)
+    if PE then
+        Remotes.StickyPartEvent = PE:FindFirstChild("StickyPartEvent")
+    end
 end)
 
 -- ============================================================
@@ -1239,6 +1243,96 @@ StealRight:AddButton({
         clearAllHighlights()
         stopClickListener()
         Notify("Highlights", "All highlights cleared.", 2)
+    end,
+})
+
+-- ============================================================
+-- [[ 15.5. ATTACH BUILD TO PLAYER ]]
+-- ============================================================
+
+StealRight:AddDivider()
+
+StealRight:AddDropdown("AttachBodyPart", {
+    Text     = "Body Part",
+    Default  = 1,
+    Values   = {"Torso", "Head", "Left Arm", "Right Arm", "Left Leg", "Right Leg", "HumanoidRootPart"},
+    Multi    = false,
+    Tooltip  = "Which body part to stick the build root onto",
+})
+
+StealRight:AddButton({
+    Text    = "Attach Build to Player",
+    Tooltip = "Sticks the root toy onto the selected player using StickyPartEvent",
+    Func    = function()
+        if not RootPart or not RootPartRaw then
+            Notify("Attach", "No root part! Set root first.", 3)
+            return
+        end
+        if not Remotes.StickyPartEvent then
+            Notify("Attach", "StickyPartEvent remote not found!", 3)
+            return
+        end
+
+        -- Find StickyPart on the root toy
+        local stickyPart = nil
+        if RootPartRaw:IsA("Model") then
+            stickyPart = RootPartRaw:FindFirstChild("StickyPart", true)
+        end
+        if not stickyPart then
+            Notify("Attach", "Root toy has no StickyPart! Use a shuriken or similar sticky toy.", 4)
+            return
+        end
+
+        -- Get target player
+        local targetName = Options.TargetPlayer and Options.TargetPlayer.Value
+        if not targetName or targetName == "" then
+            Notify("Attach", "Select a player first!", 3)
+            return
+        end
+        local target = Players:FindFirstChild(targetName)
+        if not target or not target.Character then
+            Notify("Attach", "Player not found or no character!", 3)
+            return
+        end
+
+        -- Get target body part
+        local bodyPartName = Options.AttachBodyPart and Options.AttachBodyPart.Value or "Torso"
+        local targetPart = target.Character:FindFirstChild(bodyPartName)
+        if not targetPart then
+            Notify("Attach", bodyPartName .. " not found on " .. targetName .. "!", 3)
+            return
+        end
+
+        -- Fire StickyPartEvent to stick root to the target
+        local offset = CFrame.new(0, 0, 0)
+        Remotes.StickyPartEvent:FireServer(stickyPart, targetPart, offset)
+        Notify("Attach", "Stuck build to " .. targetName .. "'s " .. bodyPartName .. "!", 3)
+    end,
+})
+
+StealRight:AddButton({
+    Text    = "Detach Build",
+    Tooltip = "Removes the sticky weld from the root toy",
+    Func    = function()
+        if not RootPartRaw then
+            Notify("Attach", "No root part!", 3)
+            return
+        end
+        local stickyPart = nil
+        if RootPartRaw:IsA("Model") then
+            stickyPart = RootPartRaw:FindFirstChild("StickyPart", true)
+        end
+        if stickyPart then
+            local weld = stickyPart:FindFirstChild("StickyWeld")
+            if weld then
+                weld:Destroy()
+                Notify("Attach", "Build detached!", 2)
+            else
+                Notify("Attach", "No StickyWeld found (not attached?)", 2)
+            end
+        else
+            Notify("Attach", "Root has no StickyPart!", 3)
+        end
     end,
 })
 
